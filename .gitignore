@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environment
+.venv/
+
+# Dataset images (too large for GitHub).
+# Upload them to Google Drive for Colab instead.
+dataset/data/
+
+# Training / inference artifacts
+checkpoints/*.pth
+logs/*.csv
+outputs/
+
+# OS files
+Thumbs.db
+.DS_Store

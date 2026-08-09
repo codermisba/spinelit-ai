@@ -1,0 +1,23 @@
+# Spine Foundation Model - dependencies
+#
+# Install CPU build on machines without CUDA:
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+# or install the CUDA build for GPU training (see https://pytorch.org).
+
+# Deep learning
+torch
+torchvision
+timm
+
+# Data / numerics
+numpy
+pandas
+Pillow
+scikit-learn
+tqdm
+
+# Visualization
+matplotlib
+
+# Local UI
+gradio
