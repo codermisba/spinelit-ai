@@ -66,6 +66,7 @@ LOG_DIR.mkdir(exist_ok=True)
 
 BEST_MODEL = CHECKPOINT_DIR / "best_model.pth"
 LATEST_MODEL = CHECKPOINT_DIR / "latest_model.pth"
+RELEASE_MODEL = CHECKPOINT_DIR / "release_model.pth"
 
 LOG_FILE = LOG_DIR / "training_log.csv"
 
@@ -253,6 +254,23 @@ class Trainer:
     # Checkpoint Saving
     # ---------------------------------------------------------
 
+    def export_release_model(self) -> None:
+        """
+        Save a small inference-only checkpoint (fp16, model weights only,
+        no optimizer/scheduler state) that fits inside GitHub's 100 MB
+        file limit so it can be committed to the repository.
+        """
+        release = {
+            "model_state_dict": {
+                key: value.half().cpu().clone()
+                for key, value in self.model.state_dict().items()
+            }
+        }
+
+        torch.save(release, RELEASE_MODEL)
+
+        print(f"Release model saved to : {RELEASE_MODEL}")
+
     def save_checkpoint(
         self,
         epoch: int,
@@ -274,6 +292,8 @@ class Trainer:
             self.best_loss = val_loss
 
             torch.save(checkpoint, BEST_MODEL)
+
+            self.export_release_model()
 
             print("Best model updated.")    # ---------------------------------------------------------
     # Resume Training

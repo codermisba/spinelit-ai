@@ -113,6 +113,10 @@ TEST_SPLIT = 0.1
 BEST_MODEL = CHECKPOINT_DIR / "best_model.pth"
 LAST_MODEL = CHECKPOINT_DIR / "last_model.pth"
 
+# Small inference-only export (fp16, model-only) committed to Git so a
+# fresh clone works without retraining. Full checkpoints stay gitignored.
+RELEASE_MODEL = CHECKPOINT_DIR / "release_model.pth"
+
 
 # ==========================================================
 # Logging

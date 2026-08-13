@@ -12,6 +12,8 @@ dataset/data/
 
 # Training / inference artifacts
 checkpoints/*.pth
+# The small fp16 release model IS committed so fresh clones work.
+!checkpoints/release_model.pth
 logs/*.csv
 outputs/
 

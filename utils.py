@@ -18,7 +18,7 @@ import torch
 from PIL import Image, ImageDraw, ImageFont
 from torchvision import transforms
 
-from config import BEST_MODEL, IMAGE_SIZE
+from config import BEST_MODEL, IMAGE_SIZE, RELEASE_MODEL
 from model import SpineFoundationModel
 
 # Lumbar levels in fixed order (matches dataset/model head order)
@@ -69,6 +69,9 @@ def load_model(
     """
     Load the Spine Foundation Model from a training checkpoint.
 
+    Falls back to the committed release model (fp16, model-only) when the
+    requested checkpoint does not exist, so a fresh clone works out of the box.
+
     Returns
     -------
     (model, device, checkpoint_path)
@@ -77,6 +80,9 @@ def load_model(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     checkpoint_path = Path(checkpoint_path)
+
+    if not checkpoint_path.exists() and RELEASE_MODEL.exists():
+        checkpoint_path = RELEASE_MODEL
 
     if not checkpoint_path.exists():
         raise FileNotFoundError(
@@ -92,7 +98,16 @@ def load_model(
         weights_only=False,
     )
 
-    model.load_state_dict(checkpoint["model_state_dict"])
+    state_dict = checkpoint.get(
+        "model_state_dict", checkpoint
+    )
+
+    first_tensor = next(iter(state_dict.values()))
+
+    if first_tensor.dtype == torch.float16:
+        model = model.half()
+
+    model.load_state_dict(state_dict)
 
     return model, device, checkpoint_path
 
@@ -116,6 +131,10 @@ def predict(
         features    : Tensor(1, 512)
     """
     input_batch = image_tensor.unsqueeze(0).to(device)
+
+    if next(model.parameters()).dtype == torch.float16:
+        input_batch = input_batch.half()
+
     return model(input_batch)
 
 
