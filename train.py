@@ -310,11 +310,12 @@ class Trainer:
                     outputs["coords"], coords
                 )
 
-                conf_loss = self.conf_loss_fn(
-                    outputs["confidence"], confidence
-                )
+            # BCELoss is not autocast-safe, so compute it in fp32
+            conf_loss = self.conf_loss_fn(
+                outputs["confidence"].float(), confidence
+            )
 
-                loss = coord_loss + (0.1 * conf_loss)
+            loss = coord_loss + (0.1 * conf_loss)
 
             self.scaler.scale(loss).backward()
 
