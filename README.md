@@ -227,6 +227,11 @@ not crash.
 ## Training details
 
 - Loss: `total_loss = coordinate_mse_loss + 0.1 * confidence_bce_loss`
+- **Confidence supervision:** the dataset labels all confidences as 1, so the
+  head is trained (self-supervised) to predict the model's own per-level
+  localization error instead: `confidence_target = exp(-err / 0.05)`. This
+  gives real per-image confidence at inference time
+  (`CONFIDENCE_SUPERVISION` in `config.py`).
 - Optimizer: AdamW (`lr=1e-4`, `weight_decay=1e-4`)
 - Scheduler: CosineAnnealingLR
 - Gradient clipping: max norm 1.0

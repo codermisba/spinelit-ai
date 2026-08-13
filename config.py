@@ -59,6 +59,16 @@ GRAD_CLIP_NORM = 1.0
 # Early stopping (patience in epochs)
 EARLY_STOPPING_PATIENCE = 10
 
+# Confidence supervision
+# ----------------------
+# The dataset labels every sample with confidence = 1, so a plain BCE head
+# just learns to always output 1.0. Instead, we train the confidence head to
+# predict the model's OWN per-level localization error (self-supervised):
+#   confidence_target = exp(-euclidean_error / CONFIDENCE_TEMPERATURE)
+# This yields a real, per-image confidence at inference time.
+CONFIDENCE_SUPERVISION = True
+CONFIDENCE_TEMPERATURE = 0.05   # normalized 0-1 coordinate units
+
 
 # ==========================================================
 # Model Configuration

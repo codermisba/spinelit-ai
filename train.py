@@ -38,6 +38,8 @@ from tqdm import tqdm
 
 from config import (
     BATCH_SIZE,
+    CONFIDENCE_SUPERVISION,
+    CONFIDENCE_TEMPERATURE,
     CPU_NUM_THREADS,
     EARLY_STOPPING_PATIENCE,
     GRAD_CLIP_NORM,
@@ -123,6 +125,37 @@ class Trainer:
 
         if resume:
             self.load_checkpoint()
+
+    # ---------------------------------------------------------
+    # Confidence Supervision
+    # ---------------------------------------------------------
+
+    def _confidence_target(self, pred, target):
+        """
+        Self-supervised confidence labels.
+
+        The dataset labels every sample with confidence = 1, which would
+        teach the head to always output 1.0. Instead we set the target from
+        the model's OWN coordinate error for each level:
+
+            confidence = exp(-euclidean_error / CONFIDENCE_TEMPERATURE)
+
+        so the head learns to report a real estimate of localization
+        quality at inference time (accurate -> high, uncertain -> low).
+        """
+        pred = pred.float()
+        target = target.float()
+
+        per_level_dist = torch.sqrt(
+            ((pred - target) ** 2).view(-1, 5, 2).sum(dim=2)
+        )
+
+        if not CONFIDENCE_SUPERVISION:
+            return torch.ones_like(per_level_dist)
+
+        return torch.exp(
+            -per_level_dist / CONFIDENCE_TEMPERATURE
+        )
 
     # ---------------------------------------------------------
     # Dataset Split (stratified by source)
@@ -295,7 +328,6 @@ class Trainer:
 
             images = batch["image"].to(DEVICE, non_blocking=True)
             coords = batch["coords"].to(DEVICE, non_blocking=True)
-            confidence = batch["confidence"].to(DEVICE, non_blocking=True)
 
             self.optimizer.zero_grad()
 
@@ -310,9 +342,14 @@ class Trainer:
                     outputs["coords"], coords
                 )
 
-            # BCELoss is not autocast-safe, so compute it in fp32
+            # BCELoss is not autocast-safe, so compute it in fp32.
+            # Confidence target = model's own per-level localization error.
+            conf_target = self._confidence_target(
+                outputs["coords"], coords
+            )
+
             conf_loss = self.conf_loss_fn(
-                outputs["confidence"].float(), confidence
+                outputs["confidence"].float(), conf_target
             )
 
             loss = coord_loss + (0.1 * conf_loss)
@@ -371,12 +408,18 @@ class Trainer:
 
             images = batch["image"].to(DEVICE, non_blocking=True)
             coords = batch["coords"].to(DEVICE, non_blocking=True)
-            confidence = batch["confidence"].to(DEVICE, non_blocking=True)
 
             outputs = self.model(images)
 
             coord_loss = self.coord_loss_fn(outputs["coords"], coords)
-            conf_loss = self.conf_loss_fn(outputs["confidence"], confidence)
+
+            conf_target = self._confidence_target(
+                outputs["coords"], coords
+            )
+
+            conf_loss = self.conf_loss_fn(
+                outputs["confidence"].float(), conf_target
+            )
 
             loss = coord_loss + (0.1 * conf_loss)
 
