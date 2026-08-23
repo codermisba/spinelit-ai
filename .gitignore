@@ -10,10 +10,10 @@ __pycache__/
 # Upload them to Google Drive for Colab instead.
 dataset/data/
 
-# Training / inference artifacts
+# ALL trained model weights stay out of Git.
+# Train on Colab, then save checkpoints to Google Drive.
 checkpoints/*.pth
-# The small fp16 release model IS committed so fresh clones work.
-!checkpoints/release_model.pth
+checkpoints/*.pt
 logs/*.csv
 outputs/
 

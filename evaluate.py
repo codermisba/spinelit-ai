@@ -4,13 +4,11 @@ evaluate.py
 
 Evaluate the Spine Foundation Model on the validation split.
 
-Loads checkpoints/best_model.pth (or a checkpoint passed with --checkpoint),
-runs inference on the same validation split used during training and reports:
-
-- Coordinate MAE / MSE (normalized 0-1 units)
-- Mean Euclidean localization error (pixels, at 512px scale)
-- Per-level localization error
+Reports:
+- Coordinate MAE / MSE (normalized)
+- Mean + per-point localization error (px) — vertebrae and discs separate
 - Confidence statistics
+- DDD grade MAE and spondylolisthesis MAE (only when labels exist)
 
 Usage
 -----
@@ -26,226 +24,173 @@ import torch
 from sklearn.model_selection import StratifiedShuffleSplit
 from torch.utils.data import DataLoader, Subset
 
-from config import BATCH_SIZE, IMAGE_SIZE, NUM_WORKERS, PIN_MEMORY
+from config import (
+    BATCH_SIZE,
+    DISC_LEVELS,
+    IMAGE_SIZE,
+    NUM_KEYPOINTS,
+    NUM_WORKERS,
+    PIN_MEMORY,
+    VERTEBRAE,
+)
 from dataset import SpineDataset
 from model import SpineFoundationModel
-from utils import LEVELS
+from utils import meyerding_grade, severity_from_grade
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+PIXEL_SCALE = IMAGE_SIZE
 
-PIXEL_SCALE = IMAGE_SIZE  # training resolution used to convert normalized -> pixels
-
-
-# ---------------------------------------------------------
-# Validation split (must match train.py exactly)
-# ---------------------------------------------------------
 
 def build_val_indices(dataset: SpineDataset) -> np.ndarray:
     """Recompute the same stratified validation split used by train.py."""
-    labels = []
-
-    for filename in dataset.image_names:
-        rows = dataset.groups.get_group(filename)
-        labels.append(rows.iloc[0]["source"])
-
-    splitter = StratifiedShuffleSplit(
-        n_splits=1,
-        test_size=0.20,
-        random_state=42,
-    )
-
+    labels = [
+        dataset.groups.get_group(fn).iloc[0]["source"]
+        for fn in dataset.image_names
+    ]
+    splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.20,
+                                      random_state=42)
     _, val_idx = next(splitter.split(dataset.image_names, labels))
-
     return val_idx
 
 
-# ---------------------------------------------------------
-# Metrics
-# ---------------------------------------------------------
+@torch.no_grad()
+def compute_metrics(model, val_loader, max_samples=None) -> dict:
 
-def compute_metrics(
-    model: SpineFoundationModel,
-    val_loader: DataLoader,
-    max_samples: int | None = None,
-) -> dict:
-    """Run inference on the validation loader and compute all metrics."""
-
-    coord_errors = []      # euclidean error per point, normalized
-    mae_squared = []       # per-axis squared errors (MSE)
-    mae_abs = []           # per-axis absolute errors (MAE)
-    confidences = []       # confidence per level per sample
+    coord_errors, confs = [], []
+    ddd_errors, spondy_errors = [], []
 
     model.eval()
 
-    with torch.no_grad():
+    for batch in val_loader:
+        images = batch["image"].to(DEVICE, non_blocking=True)
+        targets = batch["coords"].to(DEVICE, non_blocking=True)
+        visible = batch["point_visible"].to(DEVICE, non_blocking=True)
 
-        for batch in val_loader:
+        outputs = model(images)
 
-            images = batch["image"].to(DEVICE, non_blocking=True)
-            targets = batch["coords"].to(DEVICE, non_blocking=True)
+        preds = outputs["coords"].float().view(-1, NUM_KEYPOINTS, 2).cpu()
+        targs = targets.float().view(-1, NUM_KEYPOINTS, 2).cpu()
+        vis = visible.cpu()
 
-            outputs = model(images)
+        errors = torch.sqrt(((preds - targs) ** 2).sum(-1) + 1e-12)
+        errors = torch.where(
+            vis.bool(), errors, torch.tensor(float("nan"))
+        )
+        coord_errors.append(errors.numpy())
+        confs.append(outputs["localization_conf"].float().cpu().numpy())
 
-            preds = outputs["coords"].cpu().numpy()
-            confs = outputs["confidence"].cpu().numpy()
-            targs = targets.cpu().numpy()
-
-            num_points = preds.shape[1] // 2
-
-            pred_points = preds.reshape(-1, num_points, 2)
-            target_points = targs.reshape(-1, num_points, 2)
-
-            diff = pred_points - target_points
-
-            # euclidean error per point (normalized 0-1)
-            coord_errors.append(
-                np.sqrt((diff ** 2).sum(axis=-1))
+        if batch["ddd_mask"].sum() > 0:
+            mask = batch["ddd_mask"].bool()
+            ddd_pred = outputs["ddd_grade"].float().cpu() * 4.0
+            ddd_tgt = batch["ddd_grade"].cpu() * 4.0
+            ddd_errors.append(
+                (ddd_pred - ddd_tgt).abs()[mask].numpy()
             )
 
-            # per-axis errors for MAE / MSE
-            flat = diff.reshape(-1, 2)
-            mae_squared.append((flat ** 2))
-            mae_abs.append(np.abs(flat))
+        if batch["spondy_mask"].sum() > 0:
+            mask = batch["spondy_mask"].bool()
+            sp_pred = outputs["spondy_slip"].float().cpu() * 100.0
+            sp_tgt = batch["spondy_slip"].cpu() * 100.0
+            spondy_errors.append(
+                (sp_pred - sp_tgt).abs()[mask].numpy()
+            )
 
-            confidences.append(confs)
+        if max_samples and len(coord_errors) * BATCH_SIZE >= max_samples:
+            break
 
-            if max_samples is not None:
-                processed = (
-                    np.concatenate(coord_errors).shape[0]
-                )
-                if processed >= max_samples:
-                    break
+    point_errors = np.concatenate(coord_errors)      # (N, 10), NaN = masked
+    confidences = np.concatenate(confs)
 
-    coord_errors = np.concatenate(coord_errors)          # (N, 5)
-    mse = np.mean(np.concatenate(mae_squared))           # normalized units
-    mae = np.mean(np.concatenate(mae_abs))               # normalized units
-    confidences = np.concatenate(confidences)            # (N, 5)
+    n_v = len(VERTEBRAE)
 
     results = {
-        "num_samples": coord_errors.shape[0],
-        "coord_mae": mae,
-        "coord_mse": mse,
-        "mean_loc_err_norm": float(coord_errors.mean()),
-        "mean_loc_err_px": float(coord_errors.mean() * PIXEL_SCALE),
-        "per_level_px": coord_errors.mean(axis=0) * PIXEL_SCALE,
-        "per_level_norm": coord_errors.mean(axis=0),
+        "num_points": int(np.sum(~np.isnan(point_errors))),
+        "mean_loc_err_px": float(np.nanmean(point_errors) * PIXEL_SCALE),
+        "vertebra_err_px": float(
+            np.nanmean(point_errors[:, :n_v]) * PIXEL_SCALE
+        ),
+        "disc_err_px": float(
+            np.nanmean(point_errors[:, n_v:]) * PIXEL_SCALE
+        ),
+        "per_point_px": np.nanmean(point_errors, axis=0) * PIXEL_SCALE,
         "conf_mean": float(confidences.mean()),
-        "conf_per_level": confidences.mean(axis=0),
-        "conf_std": float(confidences.std()),
+        "conf_per_point": confidences.mean(axis=0),
     }
+
+    results["ddd_mae_grade"] = (
+        float(np.concatenate(ddd_errors).mean())
+        if ddd_errors else None
+    )
+    results["spondy_mae_pct"] = (
+        float(np.concatenate(spondy_errors).mean())
+        if spondy_errors else None
+    )
 
     return results
 
-
-# ---------------------------------------------------------
-# Report
-# ---------------------------------------------------------
 
 def print_summary(results: dict) -> None:
 
     print()
     print("## Foundation Model Evaluation")
     print()
-    print(f"Validation Samples : {results['num_samples']}")
+    print(f"Visible Points Evaluated : {results['num_points']}")
     print()
-    print(f"Coordinate MAE (0-1) : {results['coord_mae']:.4f}")
-    print(f"Coordinate MSE (0-1) : {results['coord_mse']:.6f}")
-    print()
-    print(
-        f"Mean Localization Error (px) : "
-        f"{results['mean_loc_err_px']:.2f}"
-    )
-    print(
-        f"Mean Localization Error (0-1): "
-        f"{results['mean_loc_err_norm']:.4f}"
-    )
+    print(f"Mean Localization Error (px) : {results['mean_loc_err_px']:.2f}")
+    print(f"Vertebrae Mean Error (px)    : {results['vertebra_err_px']:.2f}")
+    print(f"Disc Mean Error (px)         : {results['disc_err_px']:.2f}")
     print()
 
-    print("Per-Level Localization Error (px):")
+    print("Per-Point Localization Error (px):")
     print()
-
-    for i, level in enumerate(LEVELS):
-        print(
-            f"{level:<6} : "
-            f"{results['per_level_px'][i]:.2f}"
-        )
+    for i, name in enumerate(list(VERTEBRAE) + list(DISC_LEVELS)):
+        kind = "vertebra" if i < len(VERTEBRAE) else "disc"
+        print(f"{name:<6} ({kind:<8}) : {results['per_point_px'][i]:6.2f}"
+              f"   conf {results['conf_per_point'][i]:.3f}")
 
     print()
+    print(f"Mean Confidence : {results['conf_mean']:.3f}")
 
-    print("Confidence Statistics:")
-    print()
+    if results["ddd_mae_grade"] is not None:
+        print(f"DDD Grade MAE   : {results['ddd_mae_grade']:.3f} / 4 grades")
 
-    for i, level in enumerate(LEVELS):
-        print(
-            f"{level:<6} : "
-            f"{results['conf_per_level'][i]:.3f}"
-        )
+    if results["spondy_mae_pct"] is not None:
+        print(f"Spondylolisthesis MAE : {results['spondy_mae_pct']:.2f} % slip"
+              f"  (~{results['spondy_mae_pct']/25:.2f} Meyerding grades)")
 
-    print()
-    print(f"Mean Confidence        : {results['conf_mean']:.3f}")
-    print(f"Confidence Std         : {results['conf_std']:.3f}")
     print()
 
 
 def main() -> None:
 
-    parser = argparse.ArgumentParser(
-        description="Evaluate the Spine Foundation Model."
-    )
-
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default="checkpoints/best_model.pth",
-        help="Path to the checkpoint to evaluate.",
-    )
-
-    parser.add_argument(
-        "--max-samples",
-        type=int,
-        default=None,
-        help="Only evaluate this many samples (quick smoke test).",
-    )
-
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--checkpoint", default="checkpoints/best_model.pth")
+    parser.add_argument("--max-samples", type=int, default=None)
     args = parser.parse_args()
 
     checkpoint_path = Path(args.checkpoint)
 
     if not checkpoint_path.exists():
         print(
-            f"No trained model checkpoint found at {checkpoint_path}. "
-            f"Please train the model first: python train.py"
+            f"No trained model checkpoint at {checkpoint_path}."
+            f" Train first: python train.py"
         )
         return
 
-    print(f"Using Device  : {DEVICE}")
-    print(f"Checkpoint    : {checkpoint_path}")
+    print(f"Using Device : {DEVICE}")
+    print(f"Checkpoint   : {checkpoint_path}")
 
-    print("\nLoading dataset...")
     dataset = SpineDataset()
-
-    val_idx = build_val_indices(dataset)
-    val_dataset = Subset(dataset, val_idx)
+    val_dataset = Subset(dataset, build_val_indices(dataset))
 
     val_loader = DataLoader(
-        val_dataset,
-        batch_size=BATCH_SIZE,
-        shuffle=False,
-        num_workers=NUM_WORKERS,
-        pin_memory=PIN_MEMORY,
+        val_dataset, batch_size=BATCH_SIZE, shuffle=False,
+        num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
     )
 
-    print(f"Validation Images : {len(val_dataset)}")
-
-    print("\nLoading model...")
     model = SpineFoundationModel().to(DEVICE)
-
-    checkpoint = torch.load(
-        checkpoint_path,
-        map_location=DEVICE,
-        weights_only=False,
-    )
-
+    checkpoint = torch.load(checkpoint_path, map_location=DEVICE,
+                            weights_only=False)
     model.load_state_dict(checkpoint["model_state_dict"])
 
     results = compute_metrics(model, val_loader, args.max_samples)
@@ -254,5 +199,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-
     main()
