@@ -10,29 +10,37 @@ cells top to bottom. The sections below explain every step.
 
 ## Step-by-step
 
-### 1. Prepare the dataset in Google Drive
+### 1. Put the dataset in Google Drive
 
-Create this structure in your Drive:
+You already have a dataset folder in Drive — that works as-is. By default the
+notebook expects it at:
 
 ```
-MyDrive/
-└── spine-foundation/
-    └── dataset.zip
+MyDrive/dataset/
 ```
 
-`dataset.zip` must contain:
+If it is somewhere else (e.g. `MyDrive/spine-foundation/dataset`), just edit
+the `DATASET_DIR` line in **cell 5** of the notebook:
+
+```python
+DATASET_DIR = '/content/drive/MyDrive/your-folder-name'
+```
+
+The folder should contain (a zip named `dataset.zip` works too):
 
 ```
 data/processed_lsd_jpgs/     # image folders (same layout as local repo)
 data/processed_osf_jpgs/
 data/processed_spider_jpgs/
 data/processed_tseg_jpgs/
-coords_pretrain.csv          # disc landmarks  (required)
-coords_vertebrae.csv         # vertebra centres (optional — auto-derived if absent)
+coords_pretrain.csv          # disc landmarks  — already in the repo, but include if you have updates
 ddd_labels.csv               # DDD grades      (optional)
 spondy_labels.csv            # slip %          (optional)
 longitudinal_records.csv     # clinical records (optional)
 ```
+
+The folder contents are merged into `dataset/` in Colab, so any label CSVs
+you add to Drive automatically override the repo defaults.
 
 ### 2. Open Colab
 
