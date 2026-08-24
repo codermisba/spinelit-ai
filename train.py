@@ -221,10 +221,12 @@ class Trainer:
     # ---------------------------------------------------------
 
     def compute_losses(self, batch, outputs):
-        images_device = batch["image"].device
+        # Anchor every target to the device where the model OUTPUTS live
+        # (images may still be on CPU when this is called).
+        device = outputs["coords"].device
 
-        coords = batch["coords"].to(images_device, non_blocking=True)
-        visible = batch["point_visible"].to(images_device, non_blocking=True)
+        coords = batch["coords"].to(device, non_blocking=True)
+        visible = batch["point_visible"].to(device, non_blocking=True)
 
         coord_mask = visible.repeat_interleave(2, dim=1).clamp(0.0, 1.0)
 
@@ -245,8 +247,8 @@ class Trainer:
         task_losses = {"coord": coord_loss.item(), "loc_conf": loc_conf_loss.item()}
 
         if self.train_ddd:
-            ddd_target = batch["ddd_grade"].to(images_device, non_blocking=True)
-            ddd_mask = batch["ddd_mask"].to(images_device, non_blocking=True)
+            ddd_target = batch["ddd_grade"].to(device, non_blocking=True)
+            ddd_mask = batch["ddd_mask"].to(device, non_blocking=True)
 
             ddd_loss = self._masked_smooth_l1(
                 outputs["ddd_grade"], ddd_target, ddd_mask
@@ -261,8 +263,8 @@ class Trainer:
             task_losses["ddd"] = ddd_loss.item()
 
         if self.train_spondy:
-            sp_target = batch["spondy_slip"].to(images_device, non_blocking=True)
-            sp_mask = batch["spondy_mask"].to(images_device, non_blocking=True)
+            sp_target = batch["spondy_slip"].to(device, non_blocking=True)
+            sp_mask = batch["spondy_mask"].to(device, non_blocking=True)
 
             sp_loss = self._masked_smooth_l1(
                 outputs["spondy_slip"], sp_target, sp_mask
