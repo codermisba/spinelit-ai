@@ -383,8 +383,11 @@ class Trainer:
                 "cuda" if self.amp_enabled else "cpu",
                 enabled=self.amp_enabled,
             ):
+                # Forward pass ONLY. Every loss below is computed outside
+                # autocast in fp32 — BCELoss raises if autocast is active.
                 outputs = self.model(images)
-                loss, _ = self.compute_losses(batch, outputs)
+
+            loss, _ = self.compute_losses(batch, outputs)
 
             self.scaler.scale(loss).backward()
 
