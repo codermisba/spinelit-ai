@@ -26,6 +26,7 @@ from config import (
     LISTHESIS_OFFSET_THRESHOLD,
     NARROWED_DISC_THRESHOLD,
     NUM_KEYPOINTS,
+    RELEASE_MODEL,
     SPONDY_LABELS_CSV,
     VERTEBRA_LANDMARK_CSV,
 )
@@ -111,6 +112,10 @@ def load_model(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     checkpoint_path = Path(checkpoint_path)
+
+    # Fresh clone without training: fall back to the committed fp16 artifact
+    if not checkpoint_path.exists() and RELEASE_MODEL.exists():
+        checkpoint_path = RELEASE_MODEL
 
     if not checkpoint_path.exists():
         raise FileNotFoundError(
