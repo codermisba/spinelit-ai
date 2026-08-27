@@ -1,93 +1,66 @@
-# Training on Google Colab
+# Training the Vision Engine on Colab
 
-The repository ships **code only** — no weights are committed. Train on a free
-Colab GPU, then keep the checkpoints in Google Drive.
+The repository ships **code only** — no weights are committed. You train the
+imaging model (the pipeline's *vision engine*) on a free Colab GPU, keep the
+checkpoints in Google Drive, then download them for local testing.
+
+The **agentic LLM layer** (symptom agent, reasoning/fusion agent,
+verification/critique agent, longitudinal agent, report writer) already works
+without training — it calls Gemini via your `GEMINI_API_KEY`. This notebook
+only gives the pipeline its **eyes**.
 
 ## Quick path
 
-Open `colab_training.ipynb` in Colab (**File → Upload notebook**) and run the
-cells top to bottom. The sections below explain every step.
+1. Open `colab_training.ipynb` in Google Colab (**File → Upload notebook**).
+2. Set your repo URL in cell 2 (and optionally `GEMINI_KEY` to enable LLM
+   agents inside Colab).
+3. Make sure your dataset is in Drive (default: `MyDrive/dataset/`).
+4. Run the cells top-to-bottom.
 
-## Step-by-step
+## What each notebook section does
 
-### 1. Put the dataset in Google Drive
+| Section | What it does |
+|---------|--------------|
+| 0–4      | Set repo URL, check GPU, mount Drive, clone repo, install deps |
+| 5–6      | Load dataset from Drive (folder or `dataset.zip`), sanity checks |
+| 7        | (Optional) add `ddd_labels.csv` / `spondy_labels.csv` for graded heads |
+| 8        | Switch config to GPU values (`IMAGE_SIZE=512`, `BATCH_SIZE=32`) |
+| 9–10     | **Train** (`python train.py --epochs 60`) and evaluate |
+| 11       | (Optional) fit **calibrated probabilities** (`train_calibrator.py`) |
+| 12       | **Test the trained model through the agentic CLI** (`cli_pipeline.py`) |
+| 13       | (Optional) launch the Gradio agentic UI with a public `--share` link |
+| 14       | **Save checkpoints to Google Drive** (survives runtime reset) |
+| 15       | Download `best_model.pth` / `calibration.pkl` to your PC |
+| 16       | Restore checkpoints from Drive later |
 
-You already have a dataset folder in Drive — that works as-is. By default the
-notebook expects it at:
+## Save the model for later use
 
-```
-MyDrive/dataset/
-```
+Cell 14 copies to `MyDrive/spine-checkpoints/`:
 
-If it is somewhere else (e.g. `MyDrive/spine-foundation/dataset`), just edit
-the `DATASET_DIR` line in **cell 5** of the notebook:
+- `best_model.pth` — the imaging model (all tasks the vision engine uses)
+- `last_model.pth` — resume point
+- `calibration.pkl` — fitted calibrated probabilities
+- `longitudinal_model.pth` — progression model (if you train `train_clinical.py`)
 
-```python
-DATASET_DIR = '/content/drive/MyDrive/your-folder-name'
-```
+## Use the trained model back home (Windows)
 
-The folder should contain (a zip named `dataset.zip` works too):
+1. Run notebook **section 15** → download `best_model.pth` (and
+   `calibration.pkl`).
+2. Put them in your local repo:
+   ```
+   E:\spine-foundation\checkpoints\best_model.pth
+   E:\spine-foundation\checkpoints\calibration.pkl
+   ```
+3. Test:
+   ```powershell
+   .venv\Scripts\python.exe cli_pipeline.py --image "dataset/data/processed_tseg_jpgs/case_0000.jpg" --age 58 --sex female --pain-scale 6 --modality mri --pain-years 4 --start-year 2022 --symptoms "low back pain and leg numbness" --pretty
+   .venv\Scripts\python.exe app.py      # local Gradio UI
+   .venv\Scripts\python.exe evaluate.py # metrics on the validation split
+   ```
 
-```
-data/processed_lsd_jpgs/     # image folders (same layout as local repo)
-data/processed_osf_jpgs/
-data/processed_spider_jpgs/
-data/processed_tseg_jpgs/
-coords_pretrain.csv          # disc landmarks  — already in the repo, but include if you have updates
-ddd_labels.csv               # DDD grades      (optional)
-spondy_labels.csv            # slip %          (optional)
-longitudinal_records.csv     # clinical records (optional)
-```
+## Label file formats (optional but recommended for accuracy)
 
-The folder contents are merged into `dataset/` in Colab, so any label CSVs
-you add to Drive automatically override the repo defaults.
-
-### 2. Open Colab
-
-1. Go to <https://colab.research.google.com>
-2. **Runtime → Change runtime type → GPU (T4)**
-3. Upload / open `colab_training.ipynb`
-
-### 3. Run the notebook cells
-
-| Cell | What it does |
-|------|--------------|
-| 1-2 | Checks GPU, mounts Drive |
-| 3   | Clones this repo |
-| 4   | Installs `timm`, `gradio`, etc. |
-| 5   | Unzips `dataset.zip` into `dataset/` |
-| 6   | Switches config to GPU values (`IMAGE_SIZE=512`, `BATCH_SIZE=32`) |
-| 7   | Dataset + model sanity checks |
-| 8   | **Trains** (`python train.py --epochs 60`) |
-| 9   | Evaluates (per-point error + confidence) |
-| 10  | Single-image prediction demo |
-| 11  | Trains the longitudinal risk model (if records CSV present) |
-| 12  | **Copies all checkpoints to `MyDrive/spine-foundation/checkpoints/`** |
-| 13  | Launches the Gradio UI with a public `--share` link |
-
-### 4. Save the model for further use
-
-Cell 12 copies everything to Drive:
-
-- `checkpoints/best_model.pth` — imaging model (all tasks)
-- `checkpoints/last_model.pth` — resume point
-- `checkpoints/longitudinal_model.pth` — clinical risk model
-- optionally `checkpoints/release_model.pth` via
-  `python export_release.py --output /content/drive/...` (portable fp16)
-
-### 5. Use the trained model back home
-
-Copy the checkpoint from Drive into your local `checkpoints/` folder, then:
-
-```bash
-python predict.py --image scan.jpg                       # full report
-python app.py                                            # local UI
-python evaluate.py                                       # metrics
-```
-
-## Label file formats
-
-**`ddd_labels.csv`** — per disc level, grade 0-4 (Pfirrmann-style):
+**`ddd_labels.csv`** — DDD grade 0–4 per disc level (Pfirrmann-style):
 
 ```csv
 filename,level,grade
@@ -102,15 +75,11 @@ filename,level,slip_percent
 case_0000.jpg,L4/L5,18
 ```
 
-**`longitudinal_records.csv`** — one row per patient visit/timepoint:
+These labels both train the DDD/spondy heads **and** let
+`train_calibrator.py` fit true calibrated probabilities. Without them, the
+pipeline uses a documented deterministic fallback calibration.
 
-```csv
-age,sex,pain_scale,modality,pain_years,start_year,years_ahead,baseline_grade_L1/L2,...,future_grade_L5/S1
-58,female,6,MRI,4,2022,5,1.0,...,2.5
-```
+## Old single-image CLI
 
-Optional columns: `filename` (fuses the image embedding),
-`baseline_grade_*` (enables progression-risk supervision).
-
-> **Note:** DDD and spondylolisthesis heads stay **untrained** until you add
-> their label files — predictions then show a warning instead of fake numbers.
+The former `predict.py` was replaced by `cli_pipeline.py` (the agentic CLI) —
+use `cli_pipeline.py` for single-image jobs now.

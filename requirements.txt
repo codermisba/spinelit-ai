@@ -1,8 +1,15 @@
-# Spine Foundation Model - dependencies
+# Agentic Spine AI Pipeline - dependencies
 #
 # Install CPU build on machines without CUDA:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-# or install the CUDA build for GPU training (see https://pytorch.org).
+# or the CUDA build for Colab/GPU training (see https://pytorch.org).
+#
+# LLM agents: a Google Gemini free API key (get one at aistudio.google.com/apikey)
+# is set via the GEMINI_API_KEY environment variable. The LLM client uses only
+# the Python standard library, so no extra package is required. For a fully
+# local option set LLM_PROVIDER=ollama and run a local Ollama server.
+# For Colab training of the vision-engine imaging model also add:
+#   pip install google-colab openpyxl jupyter
 
 # Deep learning
 torch
@@ -15,6 +22,9 @@ pandas
 Pillow
 scikit-learn
 tqdm
+
+# Structured agent outputs
+pydantic
 
 # Visualization
 matplotlib

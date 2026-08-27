@@ -14,6 +14,28 @@ from pathlib import Path
 import torch
 
 
+# ----------------------------------------------------------
+# Load optional local secrets (`.env`) — never committed to Git.
+# Supported so `GEMINI_API_KEY` works without editing this file.
+# ----------------------------------------------------------
+def _load_dotenv():
+    env_path = Path(__file__).resolve().parent / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_dotenv()
+
+
 # ==========================================================
 # Project Paths
 # ==========================================================
@@ -171,3 +193,53 @@ IMAGE_EXTENSIONS = (
     ".tiff",
     ".dcm",
 )
+
+
+# ==========================================================
+# Agentic AI Pipeline Configuration
+# ==========================================================
+#
+# The end-to-end agentic pipeline orchestrates several specialist
+# LLM "agents" around the calibrated vision engine to produce an
+# auditable, radiologist-style report for two diseases:
+#   - Disc Degenerative Disease (DDD)
+#   - Spondylolisthesis
+#
+# Every agent returns structured JSON (LLM) or numeric findings
+# (vision engine). A verification/critique agent double-checks the
+# clinical interpretation for accuracy, and calibration converts raw
+# confidence into well-calibrated probabilities (0-1).
+# ==========================================================
+
+# --- LLM backend -------------------------------------------------
+# "gemini"  : Google Gemini free API (needs GEMINI_API_KEY) - recommended
+# "ollama"  : Local Ollama server (needs a running `ollama serve`)
+LLM_PROVIDER = "gemini"
+
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = "gemini-3.6-flash"   # current free-tier multimodal model
+GEMINI_REST_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+)
+
+OLLAMA_HOST = os.environ.get("OLLAMA_HOST", "http://127.0.0.1:11434")
+OLLAMA_MODEL = "llama3.2:3b"          # local fallback (no API key needed)
+
+LLM_TIMEOUT = 90                     # seconds for a single agent call
+LLM_TEMPERATURE = 0.2                # low temperature -> reproducible agents
+
+# --- Two supported diseases --------------------------------------
+DISEASES = ["disc_degenerative_disease", "spondylolisthesis"]
+
+# --- Calibration --------------------------------------------------
+# Calibration artifacts (fitted on Colab with labelled data). When
+# absent a deterministic fallback calibration is used so the pipeline
+# still runs end-to-end on a fresh clone.
+CALIB_ARTIFACT = CHECKPOINT_DIR / "calibration.pkl"
+
+# Per-level / per-disease reporting thresholds
+REPORT_CONFIDENCE_THRESHOLD = 0.5    # below -> flagged "low confidence"
+VERIFY_ITERATIONS = 1                 # critique passes in the verification loop
+
+# Longitudinal / progression horizon used by the longitudinal agent
+PROGRESSION_HORIZON_YEARS = 5.0
