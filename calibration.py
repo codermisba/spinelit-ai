@@ -9,9 +9,9 @@ disease — the accuracy guarantee the pipeline advertises.
 Two modes
 ---------
 1. Fitted calibrators (best). On Colab, run `train_calibrator.py` with
-   labelled DDD / spondylolisthesis data. This fits an isotonic
+   labelled Pfirrmann (DDD) data. This fits an isotonic
    regression (scikit-learn) mapping raw confidence -> observed
-   probability, and saves the artifacts to CALIB_ARTIFACT.
+   probability, and saves the artifact to CALIB_ARTIFACT.
 
 2. Deterministic fallback (no labels). A principled heuristic so the
    pipeline is fully self-contained on a fresh clone:
@@ -33,7 +33,6 @@ import numpy as np
 from config import CALIB_ARTIFACT
 
 from schemas import calibrate_ddd as _fallback_ddd
-from schemas import calibrate_spondy as _fallback_spondy
 
 
 class _Calibrators:
@@ -41,7 +40,6 @@ class _Calibrators:
 
     def __init__(self):
         self.ddd: Optional[Callable] = None       # raw_conf -> probability
-        self.spondy: Optional[Callable] = None
         self.source: str = "deterministic-fallback"
 
     def fit_ddd(self, raw_conf, y):
@@ -49,26 +47,13 @@ class _Calibrators:
         self.ddd = IsotonicRegression(out_of_bounds="clip")
         self.ddd.fit(np.asarray(raw_conf, dtype=float), np.asarray(y, dtype=float))
 
-    def fit_spondy(self, raw_conf, y):
-        from sklearn.isotonic import IsotonicRegression
-        self.spondy = IsotonicRegression(out_of_bounds="clip")
-        self.spondy.fit(np.asarray(raw_conf, dtype=float), np.asarray(y, dtype=float))
-
-    def apply_ddd(self, grade, raw_conf) -> tuple[str, float]:
+    def apply_ddd(self, pfirrmann_grade, raw_conf) -> tuple[str, float]:
         """Return (severity label, calibrated probability)."""
-        severity, fallback_prob = _fallback_ddd(grade, raw_conf)
+        severity, fallback_prob = _fallback_ddd(pfirrmann_grade, raw_conf)
         if self.ddd is not None:
             prob = float(np.clip(self.ddd.predict([float(raw_conf)])[0], 0.0, 1.0))
             return severity, prob
         return severity, fallback_prob
-
-    def apply_spondy(self, slip_percent, raw_conf) -> tuple[str, float]:
-        """Return (meyerding label, calibrated probability)."""
-        grade, fallback_prob = _fallback_spondy(slip_percent, raw_conf)
-        if self.spondy is not None:
-            prob = float(np.clip(self.spondy.predict([float(raw_conf)])[0], 0.0, 1.0))
-            return grade, prob
-        return grade, fallback_prob
 
 
 _calibrators: Optional[_Calibrators] = None
@@ -90,19 +75,14 @@ def _load_or_default() -> _Calibrators:
             with open(path, "rb") as fh:
                 state = pickle.load(fh)
             c.ddd = state.get("ddd")
-            c.spondy = state.get("spondy")
             c.source = state.get("source", "fitted")
         except Exception:  # noqa: BLE001 - corrupt artifact -> default
             c = _Calibrators()
     return c
 
 
-def calibrate_ddd(grade: float, raw_conf: float) -> tuple[str, float]:
-    return get_calibrators().apply_ddd(grade, raw_conf)
-
-
-def calibrate_spondy(slip_percent: float, raw_conf: float) -> tuple[str, float]:
-    return get_calibrators().apply_spondy(slip_percent, raw_conf)
+def calibrate_ddd(pfirrmann_grade: float, raw_conf: float) -> tuple[str, float]:
+    return get_calibrators().apply_ddd(pfirrmann_grade, raw_conf)
 
 
 def adjustment_factor(localization_quality: float) -> float:
@@ -114,5 +94,4 @@ def adjustment_factor(localization_quality: float) -> float:
 if __name__ == "__main__":
     c = get_calibrators()
     print("Calibration source:", c.source)
-    print("DDD  grade=2.3 conf=0.9 ->", c.apply_ddd(2.3, 0.9))
-    print("Spon slip=20%% conf=0.8 ->", c.apply_spondy(20.0, 0.8))
+    print("DDD  grade=3 conf=0.9 ->", c.apply_ddd(3.0, 0.9))

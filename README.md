@@ -1,7 +1,7 @@
-# Agentic AI Spine Pipeline — DDD & Spondylolisthesis
+# Agentic AI Spine Pipeline — DDD
 
-An **end-to-end agentic AI pipeline** for lumbar spine analysis covering two
-diseases: **disc degenerative disease (DDD)** and **spondylolisthesis**.
+An **end-to-end agentic AI pipeline** for lumbar spine analysis covering
+**disc degenerative disease (DDD)** with Pfirrmann grading.
 
 An LLM **orchestrator** coordinates a set of specialist *agents* and a
 calibrated *vision engine*. For every case it parses free-text symptoms,
@@ -29,8 +29,7 @@ and writes a radiologist-style report — where every finding carries a
         ┌────────────────────────────────────────────────────────────────┐
         │  2 · Vision Engine (agent)  [ConvNeXt-tiny via timm]           │
         │      vertebra/disc localization + confidence                   │
-        │      DDD grade (0-4) + calibrated P(DDD)                       │
-        │      spondylolisthesis slip % + Meyerding + calibrated P       │
+        │      DDD Pfirrmann grade (I..V) + calibrated P(DDD)            │
         │      geometric indicators (narrowed space / offset)            │
         │         -> EvidenceCard (machine-readable, cited)              │
         └────────────────────────────────────────────────────────────────┘
@@ -123,8 +122,10 @@ recommended) or `"ollama"` for a fully local model.
 The imaging model has no weights committed (kept out of Git like the robot
 norm). Train it on Colab:
 
-1. Open `colab_training.ipynb`, upload your dataset (images + `dataset/`
-   CSVs) to Drive, run all cells.
+1. Open `colab_training.ipynb`, run `prepare_spider.py` on the downloaded
+   SPIDER dataset (218 patients, 447 sagittal T2/T2-SPACE series, CC-BY 4.0)
+   to build `dataset/coords_pretrain.csv` and `dataset/ddd_labels.csv` and
+   write the JPGs, then run all cells.
 2. Store `best_model.pth` in `checkpoints/` for the pipeline to find it
    (default `checkpoints/best_model.pth`).
 
@@ -162,7 +163,7 @@ python app.py --share    # public link (Colab)
 ```
 
 Upload an image, optionally fill the clinical record and free-text symptoms,
-and see the annotated image, DDD / spondylolisthesis tables (with calibrated
+and see the annotated image, DDD tables (with calibrated
 probabilities + raw confidence), geometric indicators, the verification audit,
 the longitudinal outlook and the radiology report.
 
@@ -174,8 +175,7 @@ the longitudinal outlook and the radiology report.
   embedding feeding multiple heads (see [`model.py`](model.py)):
   - coordinate head → L1–L5 + disc centres, with per-point self-supervised
     confidence
-  - DDD head → per-level grade 0–4
-  - spondylolisthesis head → per-level slip % (Meyerding)
+  - DDD head → per-level Pfirrmann grade (multi-class softmax, cross-entropy)
 - Longitudinal `LongitudinalRiskModel` fuses clinical features + image
   embedding to predict future grades and progression risk
   ([`clinical_model.py`](clinical_model.py)).
@@ -191,6 +191,6 @@ for a strong final-year result.
 - [x] Agent framework (LLM client, schemas, per-agent roles)
 - [x] Calibrated probabilities + verification/critique loop
 - [x] Orchestrator, CLI, Gradio UI (degraded-mode safe)
-- [ ] Train localizer + DDD/spondy heads on labelled data (Colab)
+- [ ] Train localizer + DDD head on labelled data (Colab)
 - [ ] Fit calibration from labels; report calibration curves / AUROC
 - [ ] Extend to additional spine diseases / 3D (MRI) inputs

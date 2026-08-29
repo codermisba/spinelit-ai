@@ -18,7 +18,7 @@ ROLE = (
     "extract structured clinical symptoms from a patient's own free-text "
     "description. Only record facts the patient actually states; do not "
     "invent findings. Extract anything relevant to lumbar disc "
-    "degenerative disease and spondylolisthesis."
+    "degenerative disease."
 )
 
 

@@ -22,6 +22,9 @@ checkpoints/*.pt
 logs/*.csv
 outputs/
 
+# Gradio runtime artifacts
+.gradio/
+
 # OS files
 Thumbs.db
 .DS_Store

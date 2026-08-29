@@ -28,7 +28,7 @@ from agents import (
 from orchestrator import AgenticPipeline
 from schemas import ClinicalInterpretation, EvidenceCard, PatientInput
 from vision_engine import VisionEngine
-from calibration import calibrate_ddd, calibrate_spondy
+from calibration import calibrate_ddd
 
 RESULTS: dict[str, str] = {}
 
@@ -79,20 +79,16 @@ def _fake_evidence() -> EvidenceCard:
          "offset_ratio": 0.3, "offset_flag": True},
     ]
     from schemas import LevelFinding
-    for level, grade, slip in zip(
+    for level, grade in zip(
             ["L1/L2", "L2/L3", "L3/L4", "L4/L5", "L5/S1"],
-            [1.0, 2.2, 3.1, 2.0, 1.5],
-            [2.0, 8.0, 20.0, 5.0, 3.0]):
-        sev, p = calibrate_ddd(grade, 0.8)
-        mg, sp = calibrate_spondy(slip, 0.7)
+            [1.0, 2.2, 3.1, 2.0, 1.5]):
+        sev, _p = calibrate_ddd(grade, 0.8)
         card.ddd.append(LevelFinding(
-            level=level, grade=grade, severity=sev,
-            calibrated_probability=p, raw_confidence=0.8,
-            localization_quality=0.9, evidence=f"grade {grade}"))
-        card.spondy.append(LevelFinding(
-            level=level, slip_percent=slip, meyerding=mg,
-            calibrated_probability=sp, raw_confidence=0.7,
-            localization_quality=0.9, evidence=f"slip {slip}"))
+            level=level, pfirrmann_grade=grade, severity=sev,
+            pfirrmann_label="",
+            class_probabilities=[],
+            calibrated_probability=0.8, raw_confidence=0.8,
+            localization_quality=0.9, evidence=f"pfirrmann {grade}"))
     return card
 
 
@@ -105,8 +101,7 @@ def main():
                      '"pain_duration_hint":"2 years","red_flags":"",'
                      '"confidence":0.9}'),
         "fusion": ('{"summaries":{'
-                   '"disc_degenerative_disease":"moderate DDD at L3/L4",'
-                   '"spondylolisthesis":"mild slip at L3/L4"},'
+                   '"disc_degenerative_disease":"moderate DDD at L3/L4"},'
                    '"differentials":[{"disease":"disc_degenerative_disease",'
                    '"likelihood":0.8,"rationale":"narrowed space",'
                    '"evidence_ids":["dd:L3/L4","geo:L3/L4"]}],'

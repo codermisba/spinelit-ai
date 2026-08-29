@@ -61,16 +61,16 @@ class StructuredSymptoms(BaseModel):
 
 
 class LevelFinding(BaseModel):
-    """Numeric finding for a single disc level for one disease."""
+    """Numeric finding for a single disc level (DDD / Pfirrmann)."""
     level: str
-    grade: Optional[float] = None          # DDD grade 0-4 (or None)
-    slip_percent: Optional[float] = None   # spondylolisthesis slip % (or None)
-    meyerding: str = ""                    # Meyerding grade label
-    severity: str = ""                     # DDD severity label
-    raw_confidence: float = 0.0            # model's raw confidence 0-1
-    calibrated_probability: float = 0.0    # calibrated P(disease) 0-1
-    localization_quality: float = 0.0      # landmark quality 0-1
-    evidence: str = ""                     # human-readable evidence for the finding
+    pfirrmann_grade: Optional[float] = None   # predicted Pfirrmann grade 1-5
+    pfirrmann_label: str = ""                 # e.g. "III"
+    severity: str = ""                        # Normal/Mild/Moderate/Severe
+    class_probabilities: list[float] = Field(default_factory=list)  # 5 softmax probs
+    raw_confidence: float = 0.0               # max class probability 0-1
+    calibrated_probability: float = 0.0       # calibrated P(predicted grade) 0-1
+    localization_quality: float = 0.0         # landmark quality 0-1
+    evidence: str = ""                        # human-readable evidence for the finding
 
 
 class EvidenceCard(BaseModel):
@@ -81,7 +81,6 @@ class EvidenceCard(BaseModel):
     landmark_conf: list[float] = Field(default_factory=list)
     geometric_indicators: list[dict] = Field(default_factory=list)
     ddd: list[LevelFinding] = Field(default_factory=list)
-    spondy: list[LevelFinding] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -125,6 +124,7 @@ class VerificationResult(BaseModel):
 class LongitudinalAssessment(BaseModel):
     """Progression prediction from the longitudinal model + agent explanation."""
     years_ahead: float = 5.0
+    numeric_model_available: bool = False
     overall_risk: float = 0.0
     per_level_future_grade: list[float] = Field(default_factory=list)
     per_level_worsening_risk: list[float] = Field(default_factory=list)
@@ -193,9 +193,8 @@ def build_evidence_card(
     pixels,
     geo,
     ddd_grade,
+    ddd_prob,
     ddd_conf,
-    spondy_slip_pct,
-    spondy_conf,
     image_name: str = "",
     calibrate=None,
 ) -> EvidenceCard:
@@ -206,91 +205,57 @@ def build_evidence_card(
     card.geometric_indicators = list(geo)
 
     for i, level in enumerate(DISC_LEVELS):
-        # ---- DDD finding ----
-        d_grade = float(ddd_grade[i])
-        d_rc = float(ddd_conf[i])
-        d_sev, d_prob = calibrate_ddd(d_grade, d_rc) if calibrate else (
-            severity_grade(d_grade), d_rc
+        g_grade = float(ddd_grade[i])
+        g_prob_row = [float(p) for p in ddd_prob[i]]
+        g_rc = float(ddd_conf[i])
+        g_sev, g_prob = calibrate_ddd(g_grade, g_rc) if calibrate else (
+            severity_grade(g_grade), g_rc
         )
-        d_ev = (
-            f"Model DDD grade {d_grade:.2f}/4 ({d_sev}); "
-            f"calibrated probability {d_prob:.2f}; model confidence {d_rc:.2f}."
+        g_label = pfirrmann_label(g_grade)
+        g_ev = (
+            f"Model Pfirrmann grade {g_grade:.0f} ({g_label}, {g_sev}); "
+            f"class probabilities {[round(p,2) for p in g_prob_row]}; "
+            f"calibrated probability {g_prob:.2f}; "
+            f"model confidence {g_rc:.2f}."
         )
-        ddd = LevelFinding(
-            level=level, grade=round(d_grade, 3), severity=d_sev,
-            raw_confidence=round(d_rc, 3),
-            calibrated_probability=round(d_prob, 3),
+        card.ddd.append(LevelFinding(
+            level=level, pfirrmann_grade=round(g_grade, 3),
+            pfirrmann_label=g_label, severity=g_sev,
+            class_probabilities=g_prob_row,
+            raw_confidence=round(g_rc, 3),
+            calibrated_probability=round(g_prob, 3),
             localization_quality=round(float(localization_conf[i]), 3),
-            evidence=d_ev,
-        )
-
-        # ---- Spondylolisthesis finding ----
-        s_slip = float(spondy_slip_pct[i])
-        s_rc = float(spondy_conf[i])
-        s_grade, s_prob = calibrate_spondy(s_slip, s_rc) if calibrate else (
-            meyer_grade(s_slip), s_rc
-        )
-        s_ev = (
-            f"Model slip {s_slip:.1f}% ({s_grade}); "
-            f"calibrated probability {s_prob:.2f}; model confidence {s_rc:.2f}."
-        )
-        spondy = LevelFinding(
-            level=level, slip_percent=round(s_slip, 1), meyerding=s_grade,
-            raw_confidence=round(s_rc, 3),
-            calibrated_probability=round(s_prob, 3),
-            localization_quality=round(float(localization_conf[i]), 3),
-            evidence=s_ev,
-        )
-
-        card.ddd.append(ddd)
-        card.spondy.append(spondy)
+            evidence=g_ev,
+        ))
 
     return card
 
 
-def severity_grade(grade: float) -> str:
-    if grade < 0.75:
-        return "None"
-    if grade < 1.75:
+def severity_grade(pfirrmann_grade: float) -> str:
+    g = round(float(pfirrmann_grade))
+    if g <= 1:
+        return "Normal"
+    if g == 2:
         return "Mild"
-    if grade < 2.75:
+    if g == 3:
         return "Moderate"
     return "Severe"
 
 
-def meyer_grade(slip_percent: float) -> str:
-    if slip_percent < 5.0:
-        return "Normal (<5%)"
-    if slip_percent < 25.0:
-        return "Grade I"
-    if slip_percent < 50.0:
-        return "Grade II"
-    if slip_percent < 75.0:
-        return "Grade III"
-    if slip_percent <= 100.0:
-        return "Grade IV"
-    return "Grade V (spondyloptosis)"
+def pfirrmann_label(grade: float) -> str:
+    from config import PFRRMANN_GRADES
+    g = min(max(int(round(float(grade))) - 1, 0), len(PFRRMANN_GRADES) - 1)
+    return PFRRMANN_GRADES[g]
 
 
-def calibrate_ddd(grade: float, raw_conf: float) -> tuple[str, float]:
+def calibrate_ddd(pfirrmann_grade: float, raw_conf: float) -> tuple[str, float]:
     """
     Deterministic fallback calibration (no fitted calibrator):
-    P(DDD) blends the raw confidence with how far the grade deviates
-    from normal. When a fitted calibrator exists this is overridden in
-    `calibration.py`.
+    P(grade) blends the raw max-class confidence with a grade-based prior.
+    When a fitted calibrator exists this is overridden in `calibration.py`.
     """
-    severity = severity_grade(grade)
-    severity_prior = {"None": 0.10, "Mild": 0.45, "Moderate": 0.75,
+    severity = severity_grade(pfirrmann_grade)
+    severity_prior = {"Normal": 0.30, "Mild": 0.50, "Moderate": 0.75,
                       "Severe": 0.90}.get(severity, 0.5)
     probability = 0.6 * severity_prior + 0.4 * raw_conf
     return severity, max(0.0, min(1.0, probability))
-
-
-def calibrate_spondy(slip_percent: float, raw_conf: float) -> tuple[str, float]:
-    slip = meyer_grade(slip_percent)
-    if slip == "Normal (<5%)":
-        prior = 0.10
-    else:
-        prior = min(0.95, 0.35 + float(slip_percent) / 100.0)
-    probability = 0.6 * prior + 0.4 * raw_conf
-    return slip, max(0.0, min(1.0, probability))

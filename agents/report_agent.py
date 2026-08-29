@@ -38,17 +38,12 @@ def _card_compact(card: EvidenceCard | None) -> str:
         return "No imaging evidence."
     out = []
     if card.ddd:
-        out.append("DDD (level: grade/4, calibrated_prob, confidence):")
+        out.append("DDD (level: Pfirrmann_grade, label, severity, P, class_probs, conf):")
         for f in card.ddd:
             out.append(
-                f"  {f.level}: grade={f.grade}, sev={f.severity}, "
-                f"P={f.calibrated_probability}, conf={f.raw_confidence}"
-            )
-    if card.spondy:
-        out.append("Spondylolisthesis (level: slip%, meyerding, P, conf):")
-        for f in card.spondy:
-            out.append(
-                f"  {f.level}: slip={f.slip_percent}%, {f.meyerding}, "
+                f"  {f.level}: grade={f.pfirrmann_grade}, "
+                f"label={f.pfirrmann_label}, sev={f.severity}, "
+                f"class_probs={[round(p,2) for p in f.class_probabilities]}, "
                 f"P={f.calibrated_probability}, conf={f.raw_confidence}"
             )
     return "\n".join(out) or "No per-level findings."

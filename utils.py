@@ -26,8 +26,8 @@ from config import (
     LISTHESIS_OFFSET_THRESHOLD,
     NARROWED_DISC_THRESHOLD,
     NUM_KEYPOINTS,
+    PFRRMANN_GRADES,
     RELEASE_MODEL,
-    SPONDY_LABELS_CSV,
     VERTEBRA_LANDMARK_CSV,
 )
 from config import VERTEBRAE, DISC_LEVELS
@@ -83,10 +83,6 @@ def preprocess_image(image: Image.Image) -> torch.Tensor:
 
 def ddd_labels_available() -> bool:
     return Path(DDD_LABELS_CSV).exists()
-
-
-def spondy_labels_available() -> bool:
-    return Path(SPONDY_LABELS_CSV).exists()
 
 
 def vertebra_labels_available() -> bool:
@@ -159,25 +155,35 @@ def decode_outputs(outputs: dict) -> dict:
     """
     Convert raw model outputs into interpretable numpy values:
 
-        points          : (10,2) normalized coordinates
-        localization_conf: (10,) 0-1
-        ddd_grade       : (5,) 0-4 continuous
-        ddd_conf        : (5,) 0-1
-        spondy_slip_pct : (5,) percent 0-100
-        spondy_conf     : (5,) 0-1
+        points             : (10,2) normalized coordinates
+        localization_conf  : (10,) 0-1
+        ddd_prob           : (5,5) softmax Pfirrmann class probabilities
+        ddd_grade          : (5,) predicted Pfirrmann grade (1-5)
+        ddd_conf           : (5,) 0-1 maximum class probability per disc
     """
+    import numpy as np
+
+    logits = outputs["ddd_logits"].float().detach().cpu().numpy()
+    # Squeeze any leading batch dim: predict() returns (1,5,5).
+    logits = logits.reshape(-1, logits.shape[-1])          # (5, 5) per disc
+    probs = _softmax(logits, axis=-1)
+
     return {
-        "points": outputs["coords"].float().cpu().numpy()
+        "points": outputs["coords"].float().detach().cpu().numpy()
                   .reshape(NUM_KEYPOINTS, 2),
-        "localization_conf": outputs["localization_conf"].float().cpu()
+        "localization_conf": outputs["localization_conf"].float().detach().cpu()
                              .numpy().reshape(NUM_KEYPOINTS),
-        "ddd_grade": (outputs["ddd_grade"].float().cpu().numpy() * 4.0)
-                     .reshape(-1),
-        "ddd_conf": outputs["ddd_conf"].float().cpu().numpy().reshape(-1),
-        "spondy_slip_pct": (outputs["spondy_slip"].float().cpu().numpy() * 100.0)
-                           .reshape(-1),
-        "spondy_conf": outputs["spondy_conf"].float().cpu().numpy().reshape(-1),
+        "ddd_prob": probs,
+        "ddd_grade": (np.argmax(probs, axis=-1) + 1.0).reshape(-1),
+        "ddd_conf": probs.max(axis=-1).reshape(-1),
     }
+
+
+def _softmax(x, axis=-1) -> np.ndarray:
+    import numpy as np
+    x = x - x.max(axis=axis, keepdims=True)
+    e = np.exp(x)
+    return e / e.sum(axis=axis, keepdims=True)
 
 
 def norm_to_pixels(coords, width: int, height: int) -> np.ndarray:
@@ -193,30 +199,21 @@ def norm_to_pixels(coords, width: int, height: int) -> np.ndarray:
 # Geometric indicators (interpretable, no diagnosis implied)
 # ---------------------------------------------------------
 
-def severity_from_grade(grade: float) -> str:
-    """Map a continuous DDD grade (0-4) to a severity label."""
-    if grade < 0.75:
-        return "None"
-    if grade < 1.75:
+def severity_from_grade(pfirrmann_grade: float) -> str:
+    """Map a Pfirrmann grade (1-5) to a severity label."""
+    g = round(float(pfirrmann_grade))
+    if g <= 1:
+        return "Normal"
+    if g == 2:
         return "Mild"
-    if grade < 2.75:
+    if g == 3:
         return "Moderate"
     return "Severe"
 
 
-def meyerding_grade(slip_percent: float) -> str:
-    """Map slip percent to the Meyerding scale."""
-    if slip_percent < 5.0:
-        return "Normal (<5%)"
-    if slip_percent < 25.0:
-        return "Grade I"
-    if slip_percent < 50.0:
-        return "Grade II"
-    if slip_percent < 75.0:
-        return "Grade III"
-    if slip_percent <= 100.0:
-        return "Grade IV"
-    return "Grade V (spondyloptosis)"
+def pfirrmann_label(grade: float) -> str:
+    g = min(max(int(round(float(grade))) - 1, 0), len(PFRRMANN_GRADES) - 1)
+    return PFRRMANN_GRADES[g]
 
 
 def compute_geometric_indicators(points_px: np.ndarray) -> list[dict]:

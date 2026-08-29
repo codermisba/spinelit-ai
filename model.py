@@ -2,25 +2,27 @@
 model.py
 ========
 
-Spine Foundation Model — multi-task architecture.
+Spine Foundation Model — DDD-only multi-task architecture.
+
+Focus
+-----
+Disc Degenerative Disease (DDD) only, graded with the Pfirrmann scale
+(grades I..V) per disc level on sagittal T2 lumbar MRI.
 
 Tasks
 -----
 1. Landmark localization : 10 points (L1-L5 vertebral centres + 5 disc
    centres) with per-point self-supervised confidence.
-2. Disc degeneration     : per-level continuous grade 0-4 + confidence.
-3. Spondylolisthesis     : per-level slip percent (0-100) + confidence.
+2. Disc degeneration     : per-level Pfirrmann grade (5-class
+   classification, I..V) with a class-softmax confidence.
 
 Outputs (forward)
 -----------------
 {
     "coords":              Tensor(B,20),
     "localization_conf":   Tensor(B,10),
-    "ddd_grade":           Tensor(B,5),   # sigmoid -> multiply by 4
-    "ddd_conf":            Tensor(B,5),
-    "spondy_slip":         Tensor(B,5),   # sigmoid -> multiply by 100 (%)
-    "spondy_conf":         Tensor(B,5),
-    "features":            Tensor(B,512), # shared embedding for clinical model
+    "ddd_logits":          Tensor(B,5,5),  # per-disc x Pfirrmann class logits
+    "features":            Tensor(B,512),  # shared embedding
 }
 """
 
@@ -28,7 +30,7 @@ import torch
 import torch.nn as nn
 import timm
 
-from config import PRETRAINED
+from config import NUM_DISCS, NUM_KEYPOINTS, NUM_PFRRMANN_CLASSES, PRETRAINED
 
 
 class SpineFoundationModel(nn.Module):
@@ -63,35 +65,14 @@ class SpineFoundationModel(nn.Module):
             nn.Dropout(0.25),
             nn.Linear(512, 128),
             nn.GELU(),
-            nn.Linear(128, 10),
+            nn.Linear(128, NUM_KEYPOINTS),
         )
 
-        self.ddd_grade_head = nn.Sequential(
+        self.ddd_head = nn.Sequential(
             nn.Dropout(0.25),
-            nn.Linear(512, 128),
+            nn.Linear(512, 256),
             nn.GELU(),
-            nn.Linear(128, 5),
-        )
-
-        self.ddd_confidence_head = nn.Sequential(
-            nn.Dropout(0.25),
-            nn.Linear(512, 64),
-            nn.GELU(),
-            nn.Linear(64, 5),
-        )
-
-        self.spondy_slip_head = nn.Sequential(
-            nn.Dropout(0.25),
-            nn.Linear(512, 128),
-            nn.GELU(),
-            nn.Linear(128, 5),
-        )
-
-        self.spondy_confidence_head = nn.Sequential(
-            nn.Dropout(0.25),
-            nn.Linear(512, 64),
-            nn.GELU(),
-            nn.Linear(64, 5),
+            nn.Linear(256, NUM_DISCS * NUM_PFRRMANN_CLASSES),
         )
 
     def forward(self, x):
@@ -104,21 +85,15 @@ class SpineFoundationModel(nn.Module):
             self.localization_confidence_head(features)
         )
 
-        ddd_grade = torch.sigmoid(self.ddd_grade_head(features))
-
-        ddd_conf = torch.sigmoid(self.ddd_confidence_head(features))
-
-        spondy_slip = torch.sigmoid(self.spondy_slip_head(features))
-
-        spondy_conf = torch.sigmoid(self.spondy_confidence_head(features))
+        # Reshape to (B, num_discs, num_classes) logits -> softmax in decoder
+        ddd_logits = self.ddd_head(features).view(
+            -1, NUM_DISCS, NUM_PFRRMANN_CLASSES
+        )
 
         return {
             "coords": coords,
             "localization_conf": localization_conf,
-            "ddd_grade": ddd_grade,
-            "ddd_conf": ddd_conf,
-            "spondy_slip": spondy_slip,
-            "spondy_conf": spondy_conf,
+            "ddd_logits": ddd_logits,
             "features": features,
         }
 

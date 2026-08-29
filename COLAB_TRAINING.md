@@ -23,7 +23,7 @@ only gives the pipeline its **eyes**.
 |---------|--------------|
 | 0–4      | Set repo URL, check GPU, mount Drive, clone repo, install deps |
 | 5–6      | Load dataset from Drive (folder or `dataset.zip`), sanity checks |
-| 7        | (Optional) add `ddd_labels.csv` / `spondy_labels.csv` for graded heads |
+| 7        | Run `prepare_spider.py` on SPIDER to build coords + `ddd_labels.csv` |
 | 8        | Switch config to GPU values (`IMAGE_SIZE=512`, `BATCH_SIZE=32`) |
 | 9–10     | **Train** (`python train.py --epochs 60`) and evaluate |
 | 11       | (Optional) fit **calibrated probabilities** (`train_calibrator.py`) |
@@ -53,29 +53,41 @@ Cell 14 copies to `MyDrive/spine-checkpoints/`:
    ```
 3. Test:
    ```powershell
-   .venv\Scripts\python.exe cli_pipeline.py --image "dataset/data/processed_tseg_jpgs/case_0000.jpg" --age 58 --sex female --pain-scale 6 --modality mri --pain-years 4 --start-year 2022 --symptoms "low back pain and leg numbness" --pretty
+   .venv\Scripts\python.exe cli_pipeline.py --image "dataset/data/processed_spider_jpgs/case_midsag.jpg" --age 58 --sex female --pain-scale 6 --modality mri --pain-years 4 --start-year 2022 --symptoms "low back pain and leg numbness" --pretty
    .venv\Scripts\python.exe app.py      # local Gradio UI
    .venv\Scripts\python.exe evaluate.py # metrics on the validation split
    ```
 
-## Label file formats (optional but recommended for accuracy)
+## Label file formats (produced by the SPIDER prep script)
 
-**`ddd_labels.csv`** — DDD grade 0–4 per disc level (Pfirrmann-style):
+Run `prepare_spider.py` on the downloaded **SPIDER** dataset (218 patients,
+447 sagittal T2/T2-SPACE series, CC-BY 4.0). It selects the midsagittal T2
+slice + segmentation, derives the vertebral/disc centroids and the DDD labels,
+and writes the JPGs to `dataset/data/processed_spider_jpgs/`:
 
-```csv
-filename,level,grade
-case_0000.jpg,L1/L2,2
-case_0000.jpg,L2/L3,3
+```bash
+python prepare_spider.py --data_dir /path/to/SPIDER_data
 ```
 
-**`spondy_labels.csv`** — slip percentage (Meyerding derived automatically):
+It writes two CSVs:
+
+**`dataset/coords_pretrain.csv`** — disc landmark coordinates (used for
+localization; also `dataset/coords_vertebrae.csv` optional, else vertebra
+centres are derived automatically via `DERIVE_VERTEBRA_CENTERS`):
 
 ```csv
-filename,level,slip_percent
-case_0000.jpg,L4/L5,18
+filename,level,relative_x,relative_y
+case_midsag.jpg,L1/L2,0.42,0.33
 ```
 
-These labels both train the DDD/spondy heads **and** let
+**`dataset/ddd_labels.csv`** — Pfirrmann grade 1–5 per disc level:
+
+```csv
+filename,level,pfirrmann_grade
+case_midsag.jpg,L3/L4,3
+```
+
+These labels both train the multi-class DDD Pfirrmann head **and** let
 `train_calibrator.py` fit true calibrated probabilities. Without them, the
 pipeline uses a documented deterministic fallback calibration.
 

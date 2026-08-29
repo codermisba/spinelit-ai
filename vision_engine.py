@@ -5,8 +5,7 @@ vision_engine.py
 The *Vision Agent*: wraps the Spine Foundation imaging model
 (ConvNeXt-tiny backbone) and turns a single spine image into a
 machine-readable `EvidenceCard` — landmarks, geometric indicators and,
-per disc level, DDD grade + spondylolisthesis slip with calibrated
-probabilities.
+per disc level, a Pfirrmann DDD grade with calibrated probability.
 
 This is the numeric "eyes" of the pipeline. Everything it produces is
 later cited by the LLM reasoning and reporter agents, so accuracy here
@@ -26,9 +25,8 @@ import numpy as np
 import torch
 from PIL import Image
 
-from calibration import calibrate_ddd, calibrate_spondy
-from config import BEST_MODEL, CONFIDENCE_THRESHOLD, RELEASE_MODEL
-from schemas import EvidenceCard, LevelFinding
+from config import BEST_MODEL, RELEASE_MODEL
+from schemas import EvidenceCard, build_evidence_card
 from utils import (
     compute_geometric_indicators,
     decode_outputs,
@@ -91,48 +89,16 @@ class VisionEngine:
         pixels = norm_to_pixels(decoded["points"], width, height)
         geo = compute_geometric_indicators(pixels)
 
-        card = EvidenceCard(image_processed=True, image_name=image_name)
-        card.landmark_points = [[float(a), float(b)] for a, b in pixels]
-        card.landmark_conf = [float(c) for c in decoded["localization_conf"]]
-        card.geometric_indicators = geo
-
-        from config import DISC_LEVELS
-
-        for i, level in enumerate(DISC_LEVELS):
-            # ---- DDD ----
-            d_grade = float(decoded["ddd_grade"][i])
-            d_rc = float(decoded["ddd_conf"][i])
-            d_sev, d_prob = calibrate_ddd(d_grade, d_rc)
-            d_ev = (
-                f"DDD grade {d_grade:.2f}/4 ({d_sev}); "
-                f"calibrated probability {d_prob:.2f}; "
-                f"raw model confidence {d_rc:.2f}."
-            )
-            card.ddd.append(LevelFinding(
-                level=level, grade=round(d_grade, 3), severity=d_sev,
-                raw_confidence=round(d_rc, 3),
-                calibrated_probability=round(d_prob, 3),
-                localization_quality=round(float(decoded["localization_conf"][i]), 3),
-                evidence=d_ev,
-            ))
-
-            # ---- Spondylolisthesis ----
-            s_slip = float(decoded["spondy_slip_pct"][i])
-            s_rc = float(decoded["spondy_conf"][i])
-            s_grade, s_prob = calibrate_spondy(s_slip, s_rc)
-            s_ev = (
-                f"Slip {s_slip:.1f}% ({s_grade}); "
-                f"calibrated probability {s_prob:.2f}; "
-                f"raw model confidence {s_rc:.2f}."
-            )
-            card.spondy.append(LevelFinding(
-                level=level, slip_percent=round(s_slip, 1), meyerding=s_grade,
-                raw_confidence=round(s_rc, 3),
-                calibrated_probability=round(s_prob, 3),
-                localization_quality=round(float(decoded["localization_conf"][i]), 3),
-                evidence=s_ev,
-            ))
-
+        card = build_evidence_card(
+            points=decoded["points"],
+            localization_conf=decoded["localization_conf"],
+            pixels=pixels,
+            geo=geo,
+            ddd_grade=decoded["ddd_grade"],
+            ddd_prob=decoded["ddd_prob"],
+            ddd_conf=decoded["ddd_conf"],
+            image_name=image_name,
+        )
         return card
 
     def extract_features(self, image: Image.Image) -> Optional[torch.Tensor]:

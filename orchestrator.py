@@ -108,8 +108,6 @@ class AgenticPipeline:
             result.errors.append(f"fusion_agent: {exc}")
             result.interpretation = ClinicalInterpretation(
                 summaries={"disc_degenerative_disease":
-                           "(LLM reasoning unavailable — see evidence tables.)",
-                           "spondylolisthesis":
                            "(LLM reasoning unavailable — see evidence tables.)"}
             )
 

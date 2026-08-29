@@ -50,29 +50,14 @@ def _ddd_rows(result):
     return pd.DataFrame([
         {
             "Level": f.level,
-            "Grade (0-4)": f.grade,
+            "Pfirrmann": f.pfirrmann_label,
+            "Grade (1-5)": f.pfirrmann_grade,
             "Severity": f.severity,
-            "P(DDD)": f.calibrated_probability,
+            "P(Grade)": f.calibrated_probability,
             "Raw Conf": f.raw_confidence,
             "Loc Qual": f.localization_quality,
         }
         for f in result.evidence.ddd
-    ])
-
-
-def _spondy_rows(result):
-    if not result.evidence or not result.evidence.spondy:
-        return pd.DataFrame()
-    return pd.DataFrame([
-        {
-            "Level": f.level,
-            "Slip %": f.slip_percent,
-            "Meyerding": f.meyerding,
-            "P(Spondy)": f.calibrated_probability,
-            "Raw Conf": f.raw_confidence,
-            "Loc Qual": f.localization_quality,
-        }
-        for f in result.evidence.spondy
     ])
 
 
@@ -140,15 +125,20 @@ def _longitudinal_text(result):
     lo = result.longitudinal
     if lo is None:
         return "No longitudinal assessment produced."
-    text = (f"Horizon: +{lo.years_ahead} years | "
-            f"Overall worsening risk: {lo.overall_risk:.2f}")
-    if lo.per_level_future_grade:
-        text += "\n\n**Per-level** (future grade, worsening risk):\n"
-        for i, level in enumerate(DISC_LEVELS):
-            fg = lo.per_level_future_grade[i] if i < len(lo.per_level_future_grade) else None
-            wr = lo.per_level_worsening_risk[i] if i < len(lo.per_level_worsening_risk) else None
-            text += (f"- {level}: future grade = {fg}, "
-                     f"worsening risk = {wr}\n")
+    if lo.numeric_model_available:
+        text = (f"Horizon: +{lo.years_ahead} years | "
+                f"Overall worsening risk: {lo.overall_risk:.2f}")
+        if lo.per_level_future_grade:
+            text += "\n\n**Per-level** (future grade, worsening risk):\n"
+            for i, level in enumerate(DISC_LEVELS):
+                fg = lo.per_level_future_grade[i] if i < len(lo.per_level_future_grade) else None
+                wr = lo.per_level_worsening_risk[i] if i < len(lo.per_level_worsening_risk) else None
+                text += (f"- {level}: future grade = {fg}, "
+                         f"worsening risk = {wr}\n")
+    else:
+        text = (f"Horizon: +{lo.years_ahead} years | "
+                f"**5-year progression prediction: Not available** "
+                f"(no validated longitudinal model trained).")
     if lo.narrative:
         text += "\n\n**Narrative:**\n" + lo.narrative
     return text
@@ -186,7 +176,6 @@ def analyze(image, age, sex, pain_scale, modality, pain_years, start_year,
     return (
         annotated,
         _ddd_rows(result),
-        _spondy_rows(result),
         _geo_rows(result),
         _verification_text(result),
         _longitudinal_text(result),
@@ -200,16 +189,15 @@ def analyze(image, age, sex, pain_scale, modality, pain_years, start_year,
 with gr.Blocks(title="Agentic Spine AI Pipeline") as demo:
     gr.Markdown(
         """
-        # Agentic AI Pipeline — Lumbar Disc Degenerative Disease &
-        Spondylolisthesis
+        # Agentic AI Pipeline — Lumbar Disc Degenerative Disease (Pfirrmann)
 
         An end-to-end **agentic** pipeline: free-text symptoms are parsed by an
         LLM intake agent, the spine image is analysed by a calibrated vision
-        engine, a reasoning agent fuses clinical + imaging evidence, a
-        **verification/critique agent** audits the interpretation for accuracy,
-        a longitudinal agent assesses progression, and a report agent writes a
-        radiologist-style report — every finding carries a calibrated
-        probability and cited evidence.
+        engine (per-level Pfirrmann DDD grading), a reasoning agent fuses
+        clinical + imaging evidence, a **verification/critique agent** audits
+        the interpretation for accuracy, a longitudinal agent assesses
+        progression, and a report agent writes a radiologist-style report —
+        every finding carries a calibrated probability and cited evidence.
 
         > Research aid — not a medical diagnostic tool.
         """
@@ -247,9 +235,7 @@ with gr.Blocks(title="Agentic Spine AI Pipeline") as demo:
         with gr.Column(scale=2):
             image_output = gr.Image(type="pil",
                                     label="Annotated spine image")
-            with gr.Row():
-                ddd_output = gr.Dataframe(label="Disc Degenerative Disease")
-                spondy_output = gr.Dataframe(label="Spondylolisthesis")
+            ddd_output = gr.Dataframe(label="Disc Degenerative Disease (Pfirrmann)")
             geo_output = gr.Dataframe(label="Geometric indicators")
             verification_output = gr.Markdown(label="Verification audit")
             longitudinal_output = gr.Markdown(label="Longitudinal outlook")
@@ -261,7 +247,7 @@ with gr.Blocks(title="Agentic Spine AI Pipeline") as demo:
         inputs=[image_input, age_input, sex_input, pain_input,
                 modality_input, pain_years_input, start_year_input,
                 symptoms_input, horizon_input],
-        outputs=[image_output, ddd_output, spondy_output, geo_output,
+        outputs=[image_output, ddd_output, geo_output,
                  verification_output, longitudinal_output, report_output,
                  status_output],
     )

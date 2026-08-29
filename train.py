@@ -9,7 +9,7 @@ Tasks trained automatically based on label availability
 - Landmark localization      : always (disc CSV required)
 - Localization confidence    : always (self-supervised)
 - Disc degeneration (DDD)    : only when dataset/ddd_labels.csv exists
-- Spondylolisthesis          : only when dataset/spondy_labels.csv exists
+                               (per-level Pfirrmann multi-class 1-5)
 
 Features
 --------
@@ -46,14 +46,13 @@ from config import (
     CPU_NUM_THREADS,
     DDD_LOSS_WEIGHT,
     EARLY_STOPPING_PATIENCE,
-    GRADE_TEMPERATURE,
     GRAD_CLIP_NORM,
     LEARNING_RATE,
     NUM_DISCS,
     NUM_EPOCHS,
     NUM_KEYPOINTS,
+    NUM_PFRRMANN_CLASSES,
     NUM_WORKERS,
-    SPONDY_LOSS_WEIGHT,
     WEIGHT_DECAY,
     CONF_LOSS_WEIGHT,
     BEST_MODEL,
@@ -86,20 +85,13 @@ class Trainer:
         print("\nLoading Dataset...")
         self.dataset = SpineDataset()
         print(f"Dataset Loaded  ->  Images : {len(self.dataset)}")
-        print(f"DDD grading labels available    : {self.dataset.has_ddd_labels}")
-        print(
-            f"Spondylolisthesis labels avail. : {self.dataset.has_spondy_labels}"
-        )
+        print(f"DDD (Pfirrmann) labels available : {self.dataset.has_ddd_labels}")
 
-        # Tasks enabled only when their labels exist
+        # DDD task enabled only when Pfirrmann labels exist
         self.train_ddd = self.dataset.has_ddd_labels and DDD_LOSS_WEIGHT > 0
-        self.train_spondy = (
-            self.dataset.has_spondy_labels and SPONDY_LOSS_WEIGHT > 0
-        )
 
         print(f"Training tasks : localization"
-              f"{' + DDD' if self.train_ddd else ''}"
-              f"{' + spondylolisthesis' if self.train_spondy else ''}")
+              f"{' + DDD (Pfirrmann)' if self.train_ddd else ''}")
 
         self.model = SpineFoundationModel().to(DEVICE)
 
@@ -151,12 +143,6 @@ class Trainer:
 
         return torch.exp(-per_point_dist / CONFIDENCE_TEMPERATURE)
 
-    @staticmethod
-    def _grade_confidence_target(pred, target):
-        """exp(-abs_error_in_grade_units / TEMPERATURE), fp32."""
-        error = (pred - target).abs()
-        return torch.exp(-error / GRADE_TEMPERATURE)
-
     # ---------------------------------------------------------
     # Masked losses
     # ---------------------------------------------------------
@@ -169,14 +155,19 @@ class Trainer:
         )
         return (loss * mask).sum() / mask.sum().clamp(min=1.0)
 
-    @staticmethod
-    def _masked_smooth_l1(pred, target, mask):
+    def _masked_ce(self, logits, class_targets, mask):
+        """Masked cross-entropy over the (B,5) per-disc class targets."""
         if mask.sum() == 0:
-            return pred.sum() * 0.0
-        loss = nn.functional.smooth_l1_loss(
-            pred.float(), target.float(), reduction="none"
+            return logits.sum() * 0.0
+        B, D, C = logits.shape
+        # Combine the batch and disc dims; keep mask per cell.
+        flat_logits = logits.reshape(-1, C)
+        flat_targets = class_targets.reshape(-1)
+        flat_mask = mask.reshape(-1)
+        ce = nn.functional.cross_entropy(
+            flat_logits, flat_targets, reduction="none"
         )
-        return (loss.mean(dim=1) * mask).sum() / mask.sum().clamp(min=1.0)
+        return (ce * flat_mask).sum() / flat_mask.sum().clamp(min=1.0)
 
     # ---------------------------------------------------------
     # Dataset Split (stratified by source)
@@ -247,36 +238,14 @@ class Trainer:
         task_losses = {"coord": coord_loss.item(), "loc_conf": loc_conf_loss.item()}
 
         if self.train_ddd:
-            ddd_target = batch["ddd_grade"].to(device, non_blocking=True)
+            ddd_class = batch["ddd_class"].to(device, non_blocking=True)
             ddd_mask = batch["ddd_mask"].to(device, non_blocking=True)
 
-            ddd_loss = self._masked_smooth_l1(
-                outputs["ddd_grade"], ddd_target, ddd_mask
+            ddd_loss = self._masked_ce(
+                outputs["ddd_logits"], ddd_class, ddd_mask
             )
-            ddd_conf_target = self._grade_confidence_target(
-                outputs["ddd_grade"].float(), ddd_target.float()
-            )
-            ddd_conf_loss = self._masked_bce(
-                outputs["ddd_conf"], ddd_conf_target, ddd_mask
-            )
-            loss = loss + DDD_LOSS_WEIGHT * (ddd_loss + 0.1 * ddd_conf_loss)
+            loss = loss + DDD_LOSS_WEIGHT * ddd_loss
             task_losses["ddd"] = ddd_loss.item()
-
-        if self.train_spondy:
-            sp_target = batch["spondy_slip"].to(device, non_blocking=True)
-            sp_mask = batch["spondy_mask"].to(device, non_blocking=True)
-
-            sp_loss = self._masked_smooth_l1(
-                outputs["spondy_slip"], sp_target, sp_mask
-            )
-            sp_conf_target = self._grade_confidence_target(
-                outputs["spondy_slip"].float(), sp_target.float()
-            )
-            sp_conf_loss = self._masked_bce(
-                outputs["spondy_conf"], sp_conf_target, sp_mask
-            )
-            loss = loss + SPONDY_LOSS_WEIGHT * (sp_loss + 0.1 * sp_conf_loss)
-            task_losses["spondy"] = sp_loss.item()
 
         return loss, task_losses
 
@@ -321,7 +290,6 @@ class Trainer:
             },
             "tasks": {
                 "ddd": self.train_ddd,
-                "spondy": self.train_spondy,
             },
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),

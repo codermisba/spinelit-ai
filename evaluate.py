@@ -8,7 +8,7 @@ Reports:
 - Coordinate MAE / MSE (normalized)
 - Mean + per-point localization error (px) — vertebrae and discs separate
 - Confidence statistics
-- DDD grade MAE and spondylolisthesis MAE (only when labels exist)
+- DDD Pfirrmann accuracy and grade MAE (only when labels exist)
 
 Usage
 -----
@@ -35,7 +35,7 @@ from config import (
 )
 from dataset import SpineDataset
 from model import SpineFoundationModel
-from utils import meyerding_grade, severity_from_grade
+from utils import severity_from_grade
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 PIXEL_SCALE = IMAGE_SIZE
@@ -57,7 +57,7 @@ def build_val_indices(dataset: SpineDataset) -> np.ndarray:
 def compute_metrics(model, val_loader, max_samples=None) -> dict:
 
     coord_errors, confs = [], []
-    ddd_errors, spondy_errors = [], []
+    ddd_acc, ddd_mae = [], []
 
     model.eval()
 
@@ -81,19 +81,12 @@ def compute_metrics(model, val_loader, max_samples=None) -> dict:
 
         if batch["ddd_mask"].sum() > 0:
             mask = batch["ddd_mask"].bool()
-            ddd_pred = outputs["ddd_grade"].float().cpu() * 4.0
-            ddd_tgt = batch["ddd_grade"].cpu() * 4.0
-            ddd_errors.append(
-                (ddd_pred - ddd_tgt).abs()[mask].numpy()
-            )
-
-        if batch["spondy_mask"].sum() > 0:
-            mask = batch["spondy_mask"].bool()
-            sp_pred = outputs["spondy_slip"].float().cpu() * 100.0
-            sp_tgt = batch["spondy_slip"].cpu() * 100.0
-            spondy_errors.append(
-                (sp_pred - sp_tgt).abs()[mask].numpy()
-            )
+            ddd_class = batch["ddd_class"].long()
+            pred_class = outputs["ddd_logits"].argmax(dim=-1).cpu().long()
+            pred_grade = (pred_class + 1).float()
+            tgt_grade = (ddd_class + 1).float()
+            ddd_acc.append((pred_class == ddd_class)[mask].float().numpy())
+            ddd_mae.append((pred_grade - tgt_grade).abs()[mask].numpy())
 
         if max_samples and len(coord_errors) * BATCH_SIZE >= max_samples:
             break
@@ -117,13 +110,13 @@ def compute_metrics(model, val_loader, max_samples=None) -> dict:
         "conf_per_point": confidences.mean(axis=0),
     }
 
-    results["ddd_mae_grade"] = (
-        float(np.concatenate(ddd_errors).mean())
-        if ddd_errors else None
+    results["ddd_accuracy"] = (
+        float(np.concatenate(ddd_acc).mean())
+        if ddd_acc else None
     )
-    results["spondy_mae_pct"] = (
-        float(np.concatenate(spondy_errors).mean())
-        if spondy_errors else None
+    results["ddd_mae_grade"] = (
+        float(np.concatenate(ddd_mae).mean())
+        if ddd_mae else None
     )
 
     return results
@@ -151,12 +144,11 @@ def print_summary(results: dict) -> None:
     print()
     print(f"Mean Confidence : {results['conf_mean']:.3f}")
 
-    if results["ddd_mae_grade"] is not None:
-        print(f"DDD Grade MAE   : {results['ddd_mae_grade']:.3f} / 4 grades")
-
-    if results["spondy_mae_pct"] is not None:
-        print(f"Spondylolisthesis MAE : {results['spondy_mae_pct']:.2f} % slip"
-              f"  (~{results['spondy_mae_pct']/25:.2f} Meyerding grades)")
+    if results["ddd_accuracy"] is not None:
+        print(f"DDD Pfirrmann Accuracy : "
+              f"{results['ddd_accuracy'] * 100:.2f} %")
+        print(f"DDD Grade MAE          : "
+              f"{results['ddd_mae_grade']:.3f} Pfirrmann grades")
 
     print()
 

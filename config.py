@@ -55,8 +55,9 @@ for _d in (CHECKPOINT_DIR, OUTPUT_DIR, LOG_DIR):
 # Annotation / label files (all optional except the disc landmark CSV)
 DISC_LANDMARK_CSV = ROOT_DIR / "dataset" / "coords_pretrain.csv"
 VERTEBRA_LANDMARK_CSV = ROOT_DIR / "dataset" / "coords_vertebrae.csv"
+# Per-level Pfirrmann grade (1-5) labels for Disc Degenerative Disease (DDD).
+# Format: filename,level,pfirrmann_grade  (grade in 1..5)
 DDD_LABELS_CSV = ROOT_DIR / "dataset" / "ddd_labels.csv"
-SPONDY_LABELS_CSV = ROOT_DIR / "dataset" / "spondy_labels.csv"
 LONGITUDINAL_RECORDS_CSV = ROOT_DIR / "dataset" / "longitudinal_records.csv"
 
 
@@ -72,6 +73,10 @@ NUM_VERTEBRAE = len(VERTEBRAE)      # 5 vertebral body centres
 NUM_DISCS = len(DISC_LEVELS)        # 5 disc centres
 NUM_KEYPOINTS = NUM_VERTEBRAE + NUM_DISCS   # 10 points total
 NUM_OUTPUTS = NUM_KEYPOINTS * 2             # x,y per point
+
+# Pfirrmann grading for DDD: 5 grades (I..V) per disc level.
+PFRRMANN_GRADES = ["I", "II", "III", "IV", "V"]
+NUM_PFRRMANN_CLASSES = len(PFRRMANN_GRADES)
 
 # When no explicit vertebra-centre annotations exist (coords_vertebrae.csv),
 # derive weak supervision from the annotated disc centroids:
@@ -109,14 +114,12 @@ EARLY_STOPPING_PATIENCE = 10
 # Multi-task loss weights
 COORD_LOSS_WEIGHT = 1.0
 CONF_LOSS_WEIGHT = 0.1
-DDD_LOSS_WEIGHT = 1.0       # auto-disabled when no DDD labels exist
-SPONDY_LOSS_WEIGHT = 1.0    # auto-disabled when no spondylolisthesis labels
+DDD_LOSS_WEIGHT = 1.0       # auto-disabled when no Pfirrmann labels exist
 
 # Self-supervised confidence supervision:
 # target confidence = exp(-error / TEMPERATURE) using the model's own error.
 CONFIDENCE_SUPERVISION = True
 CONFIDENCE_TEMPERATURE = 0.05   # normalized coordinate units
-GRADE_TEMPERATURE = 0.75        # grade units (DDD 0-4 scale)
 
 
 # ==========================================================
@@ -229,7 +232,7 @@ LLM_TIMEOUT = 90                     # seconds for a single agent call
 LLM_TEMPERATURE = 0.2                # low temperature -> reproducible agents
 
 # --- Two supported diseases --------------------------------------
-DISEASES = ["disc_degenerative_disease", "spondylolisthesis"]
+DISEASES = ["disc_degenerative_disease"]
 
 # --- Calibration --------------------------------------------------
 # Calibration artifacts (fitted on Colab with labelled data). When

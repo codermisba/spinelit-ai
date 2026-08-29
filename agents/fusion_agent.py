@@ -5,7 +5,7 @@ Clinical–Vision Fusion Reasoning Agent.
 
 Takes the structured patient record, the parsed symptoms and the vision
 engine's `EvidenceCard`, and produces a reasoned `ClinicalInterpretation`
-for the two supported diseases (DDD, spondylolisthesis) — citing the
+for Disc Degenerative Disease (DDD, Pfirrmann grading) — citing the
 specific evidence behind each differential and reporting uncertainties.
 """
 
@@ -24,12 +24,15 @@ from .agent_base import run_json_agent, AgentError
 ROLE = (
     "You are a Spine Clinical Reasoning Agent. You integrate a patient's "
     "clinical record, their structured symptoms and the objective numeric "
-    "findings from an imaging model (the Evidence Card) to reason about two "
-    "lumbar conditions: Disc Degenerative Disease (DDD, Pfirrmann grading "
-    "0-4) and Spondylolisthesis (Meyerding slip grading). "
+    "findings from an imaging model (the Evidence Card) to reason about "
+    "Disc Degenerative Disease (DDD) using the Pfirrmann grading (grades "
+    "I-V, reported per disc level). "
     "Ground every conclusion in the cited evidence; clearly separate "
     "what is supported by imaging vs. suggested by symptoms. Where evidence "
     "is absent or contradicts a diagnosis, say so and lower the likelihood. "
+    "Be conservative: never claim a definitive grade without adequate "
+    "confidence and geometric support — mark low-confidence or "
+    "indeterminate findings as such. "
     "This is a research aid, not a diagnosis."
 )
 
@@ -54,12 +57,8 @@ def _card_to_text(card: EvidenceCard | None) -> str:
                 f"listhesis_possible={g.get('offset_flag')}"
             )
     if card.ddd:
-        lines.append("DDD per level:")
+        lines.append("DDD (Pfirrmann) per level:")
         for f in card.ddd:
-            lines.append(f"  - {f.level}: {f.model_dump()}")
-    if card.spondy:
-        lines.append("Spondylolisthesis per level:")
-        for f in card.spondy:
             lines.append(f"  - {f.level}: {f.model_dump()}")
     if card.notes:
         lines.append("notes: " + "; ".join(card.notes))
@@ -80,7 +79,7 @@ def fusion_agent(patient: PatientInput, symptoms, card: EvidenceCard | None,
         "STRUCTURED SCHEMA to return (a single JSON object):\n"
         "{\n"
         '  "summaries": { "<disease_key>": narrative string, ... },  '
-        "keys: disc_degenerative_disease, spondylolisthesis\n"
+        "keys: disc_degenerative_disease\n"
         '  "differentials": [\n'
         "      {\"disease\": string, \"likelihood\": float 0-1, "
         '"rationale": string, "evidence_ids": [string]}\n'
@@ -90,8 +89,8 @@ def fusion_agent(patient: PatientInput, symptoms, card: EvidenceCard | None,
         '  "recommendations": [string]\n'
         "}\n\n"
         "Evidence IDs you may cite: 'clinical-record', 'symptoms', "
-        "and per-level imaging citations such as 'dd:L1/L2', 'sp:L4/L5', "
-        "'geo:L3/L4' (from the Evidence Card level labels). "
+        "and per-level imaging citations such as 'dd:L1/L2', 'geo:L3/L4' "
+        "(from the Evidence Card level labels). "
         "You must reference the actual numeric values.\n\n"
         "PATIENT CLINICAL RECORD (from 'clinical-record'):\n"
         f"{_clinical_to_text(patient)}\n\n"

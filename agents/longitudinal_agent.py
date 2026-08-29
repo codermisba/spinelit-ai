@@ -75,6 +75,7 @@ def longitudinal_agent(
 
     pred = _numeric_prediction(patient, image_features, years_ahead)
     if pred is not None:
+        base.numeric_model_available = True
         base.overall_risk = round(float(pred["overall_risk"]), 3)
         base.per_level_future_grade = [
             round(float(g), 3) for g in pred["future_grade"]
@@ -88,10 +89,13 @@ def longitudinal_agent(
     task = (
         "Write a short, patient-safe, plain-language narrative paragraphs about "
         "the FUTURE progression outlook over "
-        f"{years_ahead} years for this patient's lumbar disc degeneration "
-        "and spondylolisthesis risk. Base it ONLY on the provided data. If the "
+        f"{years_ahead} years for this patient's lumbar disc degeneration. "
+        "Base it ONLY on the provided data. If the "
         "numeric longitudinal model was unavailable, say so and reason from "
-        "risk factors only. Keep to 1-2 short paragraphs.\n\n"
+        "risk factors only. Keep to 1-2 short paragraphs. "
+        "Do NOT report a numerical progression risk unless the numeric "
+        "longitudinal model was actually available; otherwise state clearly "
+        "that future progression cannot be reliably quantified.\n\n"
         "PATIENT CLINICAL:\n"
         f"age={patient.age}, sex={patient.sex or 'unspecified'}, "
         f"VAS pain={patient.pain_scale}, pain_years={patient.pain_years}, "

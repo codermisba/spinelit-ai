@@ -2,7 +2,7 @@
 dataset.py
 ==========
 
-Spine Foundation Dataset
+Spine Foundation Dataset (DDD-only)
 
 Returns
 -------
@@ -10,10 +10,8 @@ Returns
     "image":          Tensor(3,H,W),
     "coords":         Tensor(20),   # [x,y] x 5 vertebrae then x 5 discs (0-1)
     "point_visible":  Tensor(10),   # 1 = supervised point, 0 = masked out
-    "ddd_grade":      Tensor(5),    # degeneration grade /4 (0-1) per disc level
-    "ddd_mask":       Tensor(5),    # 1 when a DDD label exists for this image
-    "spondy_slip":    Tensor(5),    # slip percent /100 (0-1) per level
-    "spondy_mask":    Tensor(5),
+    "ddd_class":      Tensor(5),    # Pfirrmann class index 0-4 per disc (I..V)
+    "ddd_mask":       Tensor(5),    # 1 when a Pfirrmann label exists for this level
 }
 """
 
@@ -34,8 +32,8 @@ from config import (
     IMAGE_SIZE,
     NUM_DISCS,
     NUM_KEYPOINTS,
+    NUM_PFRRMANN_CLASSES,
     NUM_VERTEBRAE,
-    SPONDY_LABELS_CSV,
     VERTEBRA_LANDMARK_CSV,
     VERTEBRAE,
     DISC_LEVELS,
@@ -64,7 +62,6 @@ class SpineDataset(Dataset):
         disc_annotation_file=DISC_LANDMARK_CSV,
         vertebra_annotation_file=VERTEBRA_LANDMARK_CSV,
         ddd_labels_file=DDD_LABELS_CSV,
-        spondy_labels_file=SPONDY_LABELS_CSV,
         transform=None,
     ):
 
@@ -78,9 +75,8 @@ class SpineDataset(Dataset):
             Path(vertebra_annotation_file), "vertebra"
         )
 
-        self.ddd_labels = self._load_grade_labels(ddd_labels_file, "level", "grade")
-        self.spondy_labels = self._load_grade_labels(
-            spondy_labels_file, "level", "slip_percent"
+        self.ddd_labels = self._load_grade_labels(
+            ddd_labels_file, "level", "pfirrmann_grade"
         )
 
         if transform is None:
@@ -99,21 +95,16 @@ class SpineDataset(Dataset):
         self.image_names = list(self.groups.groups.keys())
 
         self.image_dirs = [
+            DATA_DIR / "processed_spider_jpgs",
             DATA_DIR / "processed_lsd_jpgs",
             DATA_DIR / "processed_osf_jpgs",
-            DATA_DIR / "processed_spider_jpgs",
             DATA_DIR / "processed_tseg_jpgs",
         ]
 
-        # Task availability flags used by train.py to enable/disable losses
+        # Task availability flag used by train.py to enable/disable the DDD loss
         self.has_ddd_labels = (
             len(set(self.ddd_labels["filename"]) & set(self.image_names)) > 0
             if self.ddd_labels is not None
-            else False
-        )
-        self.has_spondy_labels = (
-            len(set(self.spondy_labels["filename"]) & set(self.image_names)) > 0
-            if self.spondy_labels is not None
             else False
         )
 
@@ -240,7 +231,11 @@ class SpineDataset(Dataset):
 
     @staticmethod
     def _grade_targets(labels_df, filename, key_column, value_column, levels):
-        targets = torch.zeros(len(levels), dtype=torch.float32)
+        """
+        Return (class_targets, mask) where Pfirrmann grade (1-5) in the label
+        CSV is converted to a zero-based class index (0-4).
+        """
+        targets = torch.zeros(len(levels), dtype=torch.long)
         mask = torch.zeros(len(levels), dtype=torch.float32)
         if labels_df is None:
             return targets, mask
@@ -250,7 +245,9 @@ class SpineDataset(Dataset):
                 value = float(rows.loc[level, value_column])
                 if isinstance(rows.loc[level], pd.DataFrame):
                     value = float(rows.loc[level].iloc[0][value_column])
-                targets[i] = value
+                cls = int(round(value)) - 1
+                cls = min(max(cls, 0), NUM_PFRRMANN_CLASSES - 1)
+                targets[i] = cls
                 mask[i] = 1.0
         return targets, mask
 
@@ -260,11 +257,8 @@ class SpineDataset(Dataset):
 
         coords, visibility = self._get_landmarks(filename)
 
-        ddd_raw, ddd_mask = self._grade_targets(
-            self.ddd_labels, filename, "level", "grade", self.level_order
-        )
-        spondy_raw, spondy_mask = self._grade_targets(
-            self.spondy_labels, filename, "level", "slip_percent",
+        ddd_class, ddd_mask = self._grade_targets(
+            self.ddd_labels, filename, "level", "pfirrmann_grade",
             self.level_order,
         )
 
@@ -276,10 +270,8 @@ class SpineDataset(Dataset):
             "image": image,
             "coords": torch.tensor(coords, dtype=torch.float32),
             "point_visible": visibility,
-            "ddd_grade": ddd_raw / 4.0,          # normalize 0-4 -> 0-1
+            "ddd_class": ddd_class,
             "ddd_mask": ddd_mask,
-            "spondy_slip": spondy_raw / 100.0,   # normalize % -> 0-1
-            "spondy_mask": spondy_mask,
         }
 
 
@@ -289,7 +281,6 @@ if __name__ == "__main__":
 
     print(f"Dataset Size : {len(dataset)}")
     print(f"DDD labels available       : {dataset.has_ddd_labels}")
-    print(f"Spondy labels available    : {dataset.has_spondy_labels}")
 
     sample = dataset[0]
 
@@ -302,3 +293,7 @@ if __name__ == "__main__":
     print()
     print("Point Visibility")
     print(sample["point_visible"])
+    print()
+    print("DDD class (0-4) & mask")
+    print(sample["ddd_class"])
+    print(sample["ddd_mask"])
