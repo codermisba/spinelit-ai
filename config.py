@@ -115,6 +115,9 @@ EARLY_STOPPING_PATIENCE = 10
 COORD_LOSS_WEIGHT = 1.0
 CONF_LOSS_WEIGHT = 0.1
 DDD_LOSS_WEIGHT = 1.0       # auto-disabled when no Pfirrmann labels exist
+# Label smoothing for the Pfirrmann cross-entropy (grading is ordinal and
+# labels can be noisy; smoothing stabilizes training).
+DDD_LABEL_SMOOTHING = 0.1
 
 # Self-supervised confidence supervision:
 # target confidence = exp(-error / TEMPERATURE) using the model's own error.
@@ -149,6 +152,10 @@ LONGITUDINAL_MODEL_NAME = CHECKPOINT_DIR / "longitudinal_model.pth"
 
 MODEL_NAME = "convnext_tiny"
 PRETRAINED = True   # ImageNet-pretrained backbone via timm
+
+# Which ConvNeXt stage (features_only index, stride 4/8/16/32) is pooled for
+# disc-localized DDD classification. Stage 2 = stride 16 (good resolution).
+DISC_FEATURE_STAGE = 2
 
 
 # ==========================================================

@@ -45,6 +45,7 @@ from config import (
     COORD_LOSS_WEIGHT,
     CPU_NUM_THREADS,
     DDD_LOSS_WEIGHT,
+    DDD_LABEL_SMOOTHING,
     EARLY_STOPPING_PATIENCE,
     GRAD_CLIP_NORM,
     LEARNING_RATE,
@@ -175,7 +176,8 @@ class Trainer:
         flat_targets = class_targets.reshape(-1)
         flat_mask = mask.reshape(-1)
         ce = nn.functional.cross_entropy(
-            flat_logits, flat_targets, reduction="none"
+            flat_logits, flat_targets, reduction="none",
+            label_smoothing=DDD_LABEL_SMOOTHING,
         )
         return (ce * flat_mask).sum() / flat_mask.sum().clamp(min=1.0)
 
