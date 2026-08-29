@@ -70,6 +70,16 @@ LOG_DIR = Path("logs")
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+def _shrink_rare_labels(labels):
+    """Collapse classes with <2 members so StratifiedShuffleSplit works."""
+    from collections import Counter
+    counts = Counter(labels)
+    rare = {lab for lab, n in counts.items() if n < 2}
+    if not rare:
+        return list(labels)
+    return [("other" if lab in rare else lab) for lab in labels]
+
+
 class Trainer:
 
     def __init__(
@@ -173,21 +183,51 @@ class Trainer:
     # Dataset Split (stratified by source)
     # ---------------------------------------------------------
 
-    def prepare_dataloaders(self) -> None:
+    def _split_labels(self) -> list:
+        """
+        Build a per-file stratification label for the train/val split.
 
-        print("\nPreparing Train / Validation Split...")
+        Priority:
+          1. "source" column in the landmark CSV (multi-centre scans).
+          2. dominant Pfirrmann grade of the file (from ddd_labels.csv).
+        Each returned label must occur at least twice for
+        StratifiedShuffleSplit to work, so low-frequency labels are
+        collapsed into a single 'other' bucket.
+        """
+        import collections
 
-        # Stratify by the scan "source" when present; otherwise every file is
-        # its own group (e.g. SPIDER coords_pretrain.csv has no source column).
-        first_df = self.dataset.disc_csv
-        has_source = "source" in first_df.columns
-        if has_source:
+        # 1) source column if present
+        if "source" in self.dataset.disc_csv.columns:
             labels = [
                 self.dataset.groups.get_group(fn).iloc[0]["source"]
                 for fn in self.dataset.image_names
             ]
-        else:
-            labels = list(range(len(self.dataset.image_names)))
+            return _shrink_rare_labels(labels)
+
+        # 2) dominant Pfirrmann grade per file
+        ddd = self.dataset.ddd_labels
+        if ddd is not None and len(ddd):
+            labels = []
+            for fn in self.dataset.image_names:
+                rows = ddd[ddd["filename"].astype(str) == str(fn)]
+                if len(rows) == 0:
+                    labels.append("nograde")
+                else:
+                    g = rows["pfirrmann_grade"].astype(float)
+                    labels.append(str(int(round(g.median()))))
+            return _shrink_rare_labels(labels)
+
+        # 3) fallback: no usable stratification -> random split
+        raise ValueError(
+            "Cannot stratify split: no 'source' column and no DDD labels "
+            "available."
+        )
+
+    def prepare_dataloaders(self) -> None:
+
+        print("\nPreparing Train / Validation Split...")
+
+        labels = self._split_labels()
 
         splitter = StratifiedShuffleSplit(
             n_splits=1, test_size=0.20, random_state=42,

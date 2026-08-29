@@ -41,16 +41,39 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 PIXEL_SCALE = IMAGE_SIZE
 
 
-def build_val_indices(dataset: SpineDataset) -> np.ndarray:
-    """Recompute the same stratified validation split used by train.py."""
-    has_source = "source" in dataset.disc_csv.columns
-    if has_source:
+def _split_labels(dataset: SpineDataset) -> list:
+    """Per-file stratification label, matching train.py's rule."""
+    import collections
+    if "source" in dataset.disc_csv.columns:
         labels = [
             dataset.groups.get_group(fn).iloc[0]["source"]
             for fn in dataset.image_names
         ]
-    else:
-        labels = list(range(len(dataset.image_names)))
+        return _shrink_rare_labels(labels)
+    ddd = dataset.ddd_labels
+    if ddd is not None and len(ddd):
+        labels = []
+        for fn in dataset.image_names:
+            rows = ddd[ddd["filename"].astype(str) == str(fn)]
+            if len(rows) == 0:
+                labels.append("nograde")
+            else:
+                labels.append(str(int(round(rows["pfirrmann_grade"]
+                                           .astype(float).median()))))
+        return _shrink_rare_labels(labels)
+    raise ValueError("No 'source' column and no DDD labels for split stratify.")
+
+
+def _shrink_rare_labels(labels):
+    from collections import Counter
+    counts = Counter(labels)
+    rare = {lab for lab, n in counts.items() if n < 2}
+    return [("other" if lab in rare else lab) for lab in labels]
+
+
+def build_val_indices(dataset: SpineDataset) -> np.ndarray:
+    """Recompute the same stratified validation split used by train.py."""
+    labels = _split_labels(dataset)
     splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.20,
                                       random_state=42)
     _, val_idx = next(splitter.split(dataset.image_names, labels))
