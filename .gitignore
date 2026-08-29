@@ -13,6 +13,14 @@ __pycache__/
 # Upload them to Google Drive for Colab instead.
 dataset/data/
 
+# Generated landmark/grading CSVs — produced fresh by prepare_spider.py.
+# Do NOT track them (stale copies break the SPIDER flow).
+dataset/coords_pretrain.csv
+dataset/coords_vertebrae.csv
+dataset/coords_rsna_improved.csv
+dataset/ddd_labels.csv
+dataset/longitudinal_records.csv
+
 # ALL trained model weights stay out of Git...
 checkpoints/*.pth
 checkpoints/*.pt
