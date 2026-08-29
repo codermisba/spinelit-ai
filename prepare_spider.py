@@ -191,7 +191,8 @@ def _process_case(
 ) -> None:
     # Locate the T2 image, segmentation, and radiology annotations.
     nii = sorted(case_dir.rglob("*T2*.nii*"))
-    seg = sorted(case_dir.rglob("*seg*.nii*") + case_dir.rglob("*mask*.nii*"))
+    seg = sorted(list(case_dir.rglob("*seg*.nii*"))
+                 + list(case_dir.rglob("*mask*.nii*")))
     rad = list(case_dir.rglob("*.csv"))
     if not nii or not seg:
         return
