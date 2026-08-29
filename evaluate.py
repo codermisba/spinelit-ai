@@ -43,10 +43,14 @@ PIXEL_SCALE = IMAGE_SIZE
 
 def build_val_indices(dataset: SpineDataset) -> np.ndarray:
     """Recompute the same stratified validation split used by train.py."""
-    labels = [
-        dataset.groups.get_group(fn).iloc[0]["source"]
-        for fn in dataset.image_names
-    ]
+    has_source = "source" in dataset.disc_csv.columns
+    if has_source:
+        labels = [
+            dataset.groups.get_group(fn).iloc[0]["source"]
+            for fn in dataset.image_names
+        ]
+    else:
+        labels = list(range(len(dataset.image_names)))
     splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.20,
                                       random_state=42)
     _, val_idx = next(splitter.split(dataset.image_names, labels))

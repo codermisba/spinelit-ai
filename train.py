@@ -177,10 +177,17 @@ class Trainer:
 
         print("\nPreparing Train / Validation Split...")
 
-        labels = [
-            self.dataset.groups.get_group(fn).iloc[0]["source"]
-            for fn in self.dataset.image_names
-        ]
+        # Stratify by the scan "source" when present; otherwise every file is
+        # its own group (e.g. SPIDER coords_pretrain.csv has no source column).
+        first_df = self.dataset.disc_csv
+        has_source = "source" in first_df.columns
+        if has_source:
+            labels = [
+                self.dataset.groups.get_group(fn).iloc[0]["source"]
+                for fn in self.dataset.image_names
+            ]
+        else:
+            labels = list(range(len(self.dataset.image_names)))
 
         splitter = StratifiedShuffleSplit(
             n_splits=1, test_size=0.20, random_state=42,
