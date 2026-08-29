@@ -241,14 +241,27 @@ class SpineDataset(Dataset):
             return targets, mask
         rows = labels_df[labels_df["filename"] == filename].set_index(key_column)
         for i, level in enumerate(levels):
-            if level in rows.index:
-                value = float(rows.loc[level, value_column])
-                if isinstance(rows.loc[level], pd.DataFrame):
-                    value = float(rows.loc[level].iloc[0][value_column])
-                cls = int(round(value)) - 1
-                cls = min(max(cls, 0), NUM_PFRRMANN_CLASSES - 1)
-                targets[i] = cls
-                mask[i] = 1.0
+            if level not in rows.index:
+                continue
+            val = rows.loc[level, value_column]
+            # val may be a scalar, or a pandas Series/DataFrame when a level
+            # appears in more than one row (duplicate grade annotations).
+            if isinstance(val, pd.DataFrame):
+                val = val[value_column]
+            if isinstance(val, pd.Series):
+                vals = pd.to_numeric(val, errors="coerce").dropna()
+                if vals.empty:
+                    continue
+                value = float(vals.median())
+            else:
+                try:
+                    value = float(val)
+                except (TypeError, ValueError):
+                    continue
+            cls = int(round(value)) - 1
+            cls = min(max(cls, 0), NUM_PFRRMANN_CLASSES - 1)
+            targets[i] = cls
+            mask[i] = 1.0
         return targets, mask
 
     def __getitem__(self, index):
