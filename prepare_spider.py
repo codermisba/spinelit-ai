@@ -196,7 +196,7 @@ def _process_case(
     lo, hi = np.percentile(image_slice, [1, 99]) if image_slice.size else (0, 1)
     arr8 = np.clip((image_slice - lo) / max(hi - lo, 1e-6), 0, 1)
     arr8 = (arr8 * 255).astype(np.uint8)
-    Image.fromarray(arr8, mode="L").convert("RGB").save(jpg_out / fname)
+    Image.fromarray(arr8).convert("L").convert("RGB").save(jpg_out / fname)
 
     # Disc centroids from the mask (201..205 = lumbar discs).
     centroids = {}
