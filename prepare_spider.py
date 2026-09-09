@@ -173,11 +173,14 @@ def _process_case(
     jpg_out: Path,
     coords_rows: list,
     grade_rows: list,
+    skips: dict,
 ) -> None:
     try:
         image_vol = _load_volume(image_path)
         mask_vol = _load_volume(mask_path)
     except Exception as exc:  # noqa: BLE001
+        reason = f"{exc.__class__.__name__}: {str(exc)[:80]}"
+        skips[reason] = skips.get(reason, 0) + 1
         print(f"  [skip] {image_path.name}: {exc}")
         return
 
@@ -272,6 +275,7 @@ def main() -> None:
 
     coords_rows: list = []
     grade_rows: list = []
+    skips: dict = {}
 
     used = 0
     for img in images:
@@ -283,7 +287,7 @@ def main() -> None:
         if img.name not in masks:
             continue
         _process_case(img, masks[img.name], gradings, patient_id,
-                      jpg_out, coords_rows, grade_rows)
+                      jpg_out, coords_rows, grade_rows, skips)
         used += 1
 
     coords_df = pd.DataFrame(coords_rows)
@@ -295,6 +299,15 @@ def main() -> None:
     print(f"Disc landmark rows      : {len(coords_df)}")
     print(f"Pfirrmann label rows    : {len(grade_df)}")
     print(f"Images written to       : {jpg_out}")
+
+    jpg_count = sum(1 for _ in jpg_out.glob("*.jpg"))
+    print(f"JPGs on disk            : {jpg_count}")
+    files_with_centroids = len(set(r["filename"] for r in coords_rows))
+    print(f"Cases with disc labels  : {files_with_centroids} of {used}")
+    if skips:
+        print("Skip reasons (top 10):")
+        for reason, n in sorted(skips.items(), key=lambda kv: -kv[1])[:10]:
+            print(f"  {n:5d} x {reason}")
 
     if not used:
         raise SystemExit(
