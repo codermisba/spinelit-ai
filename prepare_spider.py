@@ -184,53 +184,59 @@ def _process_case(
         print(f"  [skip] {image_path.name}: {exc}")
         return
 
-    # Save the mid-sagittal T2 slice as a JPG (the depth with the most
-    # vertebra+disc signal is a good proxy for the mid-sagittal plane).
-    fname = f"{patient_id}_mid.jpg"
-    combined_signal = (mask_vol > 0).sum(axis=(0, 1))
-    depth = int(np.argmax(combined_signal)) if combined_signal.max() > 0 else (
-        image_vol.shape[2] // 2
-    )
-    h, w = image_vol.shape[:2]
-    image_slice = image_vol[:, :, depth].astype(np.float32)
-    lo, hi = np.percentile(image_slice, [1, 99]) if image_slice.size else (0, 1)
-    arr8 = np.clip((image_slice - lo) / max(hi - lo, 1e-6), 0, 1)
-    arr8 = (arr8 * 255).astype(np.uint8)
-    Image.fromarray(arr8).convert("L").convert("RGB").save(jpg_out / fname)
+    try:
+        # Save the mid-sagittal T2 slice as a JPG (the depth with the most
+        # vertebra+disc signal is a good proxy for the mid-sagittal plane).
+        fname = f"{patient_id}_mid.jpg"
+        combined_signal = (mask_vol > 0).sum(axis=(0, 1))
+        depth = int(np.argmax(combined_signal)) if combined_signal.max() > 0 else (
+            image_vol.shape[2] // 2
+        )
+        h, w = image_vol.shape[:2]
+        image_slice = image_vol[:, :, depth].astype(np.float32)
+        lo, hi = np.percentile(image_slice, [1, 99]) if image_slice.size else (0, 1)
+        arr8 = np.clip((image_slice - lo) / max(hi - lo, 1e-6), 0, 1)
+        arr8 = (arr8 * 255).astype(np.uint8)
+        Image.fromarray(arr8).convert("L").convert("RGB").save(jpg_out / fname)
 
-    # Disc centroids from the mask (201..205 = lumbar discs).
-    centroids = {}
-    for lab, level in MASK_DISC_TO_LEVEL.items():
-        c = _disc_centroid_on_best_slice(image_vol, mask_vol, lab)
-        if c is not None:
-            centroids[level] = c
+        # Disc centroids from the mask (201..205 = lumbar discs).
+        centroids = {}
+        for lab, level in MASK_DISC_TO_LEVEL.items():
+            c = _disc_centroid_on_best_slice(image_vol, mask_vol, lab)
+            if c is not None:
+                centroids[level] = c
 
-    for level in DISC_LEVELS:
-        if level in centroids:
-            rx, ry = centroids[level]
-            coords_rows.append(
-                {"filename": fname, "level": level,
-                 "relative_x": round(rx, 6), "relative_y": round(ry, 6)}
-            )
+        for level in DISC_LEVELS:
+            if level in centroids:
+                rx, ry = centroids[level]
+                coords_rows.append(
+                    {"filename": fname, "level": level,
+                     "relative_x": round(rx, 6), "relative_y": round(ry, 6)}
+                )
 
-    # Pfirrmann grades from the radiology CSV, keyed on patient id.
-    pat = gradings_df[gradings_df["Patient"].astype(str) == str(patient_id)]
-    if not pat.empty:
-        for label, level in IVD_LABEL_TO_LEVEL.items():
-            row = pat[pat["IVD label"].astype(str) == str(label)]
-            if row.empty:
-                continue
-            val = str(row.iloc[0][PFRRMANN_COL]).strip()
-            if val and val.lower() not in ("nan", "none", ""):
-                try:
-                    g = int(float(val))
-                except ValueError:
+        # Pfirrmann grades from the radiology CSV, keyed on patient id.
+        pat = gradings_df[gradings_df["Patient"].astype(str) == str(patient_id)]
+        if not pat.empty:
+            for label, level in IVD_LABEL_TO_LEVEL.items():
+                row = pat[pat["IVD label"].astype(str) == str(label)]
+                if row.empty:
                     continue
-                if 1 <= g <= 5:
-                    grade_rows.append(
-                        {"filename": fname, "level": level,
-                         "pfirrmann_grade": g}
-                    )
+                val = str(row.iloc[0][PFRRMANN_COL]).strip()
+                if val and val.lower() not in ("nan", "none", ""):
+                    try:
+                        g = int(float(val))
+                    except ValueError:
+                        continue
+                    if 1 <= g <= 5:
+                        grade_rows.append(
+                            {"filename": fname, "level": level,
+                             "pfirrmann_grade": g}
+                        )
+    except Exception as exc:  # noqa: BLE001 - one bad case must not abort the run
+        reason = f"{exc.__class__.__name__}: {str(exc)[:80]}"
+        skips[reason] = skips.get(reason, 0) + 1
+        print(f"  [skip] {image_path.name} (post-load): {exc}")
+        return
 
 
 def main() -> None:
@@ -241,6 +247,12 @@ def main() -> None:
     ap.add_argument("--skip_download", action="store_true",
                     help="data already downloaded/extracted in --data_dir")
     args = ap.parse_args()
+
+    # Never let a stale CSV from a previous (possibly crashed) run masquerade
+    # as this run's output: remove them up front; they are fully regenerated.
+    for stale in (ROOT_DIR / "dataset" / "coords_pretrain.csv",
+                  ROOT_DIR / "dataset" / "ddd_labels.csv"):
+        stale.unlink(missing_ok=True)
 
     data_dir = Path(args.data_dir)
     _require_simpleitk()
