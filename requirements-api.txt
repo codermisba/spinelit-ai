@@ -1,0 +1,7 @@
+# Extra dependencies for the REST API (api_server.py) and its tests.
+# Install on the server / Colab with:
+#   pip install -r requirements-api.txt
+fastapi
+uvicorn
+python-multipart
+httpx            # used by the local TestClient smoke tests

@@ -95,8 +95,8 @@ class _BaseClient:
     def complete_text(self, prompt: str) -> str:
         return self._chat(prompt).strip()
 
-    def complete_json(self, prompt: str):
-        raw = self._chat(prompt)
+    def complete_json(self, prompt: str, response_schema: str | None = None):
+        raw = self._chat(prompt, response_schema=response_schema)
         return _extract_json(raw)
 
 

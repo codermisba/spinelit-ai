@@ -1,0 +1,130 @@
+# ==========================================================
+# Spine decision-support pipeline configuration
+# ==========================================================
+#
+# Every threshold used by the evidence/validation safety layer is
+# configured here. Values marked "requires validation" are NOT
+# clinically validated defaults — they must be confirmed against a
+# validated labelled dataset before being used for clinical work.
+#
+# This file is loaded by pipeline_config.py. config.py (legacy) is
+# intentionally left untouched so existing modules keep working.
+
+pipeline:
+  version: "1.1.0"
+  name: "spine-decision-support"
+
+# ----------------------------------------------------------
+# Confidence thresholds (section 4 of the spec)
+#   confidence >= moderate      -> HIGH_CONFIDENCE
+#   low <= confidence < moderate-> MODERATE_CONFIDENCE
+#   confidence < low            -> LOW_CONFIDENCE
+# ----------------------------------------------------------
+confidence_thresholds:
+  low: 0.50
+  moderate: 0.70
+
+# ----------------------------------------------------------
+# Geometry thresholds (requires validation before clinical use)
+# ----------------------------------------------------------
+geometry:
+  # offset ratio above this -> listhesis_possible = true
+  listhesis_offset_ratio_threshold: 0.25
+  # relative disc space below this -> space_narrowed = true
+  relative_space_threshold: 0.85
+  # minimum landmark quality to trust a geometric measurement
+  min_landmark_confidence: 0.50
+
+# ----------------------------------------------------------
+# Evidence matrix weights (section 16)
+# NOTE: these are NOT calibrated probabilities and must not be
+# reported as medical probabilities.
+# ----------------------------------------------------------
+evidence_weights:
+  model_support: 1.0
+  geometric_support: 1.5
+  clinical_support: 0.5
+  model_contradiction: -1.0
+  geometric_contradiction: -2.0
+  confidence_multiplier: 0.75
+
+# Classification cutoffs for the weighted evidence score.
+evidence_score_thresholds:
+  strongly_supported: 2.2
+  supported: 1.0
+  provisional: 0.0
+  indeterminate: -0.5
+
+# ----------------------------------------------------------
+# Reporting rules
+# ----------------------------------------------------------
+reporting:
+  allow_causal_language: false        # "causes / is responsible for / proves"
+  allow_numeric_risk_without_model: false
+  require_radiologist_disclaimer: true
+  max_impression_points: 5
+  llm_max_retries: 2
+  require_low_confidence_disclosure: true
+
+# ----------------------------------------------------------
+# Validation rules (section 27)
+# ----------------------------------------------------------
+validation:
+  require_geometry_for_spondylolisthesis_confirmation: true
+  require_level_validation: true
+  reject_unsupported_grade: true
+  # A severe slip (>= slip_pct) claim is only confirmable when the
+  # independent geometry both flags listhesis AND can validate severity.
+  severe_slip_percent: 40.0
+  # Patterns that cause the report to be rejected/regenerated. These are
+  # screenshots from section 23 — they are heuristics, not medical rules.
+  reject_patterns:
+    - regex: "confirmed(\\s+|-)grade\\s+iii"
+      reason: "unsupported Grade III confirmation without validation evidence"
+    - regex: "\\b(causes|is responsible for|proves)\\b"
+      reason: "causal language used without validated causal evidence"
+      allowed_when_causal_language: false
+    - regex: "false-?positive\\s+artifact"
+      reason: "artifact label requires independently established artifact status"
+    - regex: "worsening\\s+risk\\s*=\\s*0(\\.[0-9]+)?\\b|risk\\s+(of|for)\\s+[0-9.]+%" 
+      reason: "numeric longitudinal risk generated without a validated model"
+    - regex: "risk_score\\s*[=:].{0,20}0(\\.0+)?(,|\\}|$)"
+      reason: "numeric risk score emitted without a validated model"
+    - regex: "nerve\\s+root\\s+compression\\s+(confirmed|is present|established)"
+      reason: "nerve-root compression asserted without supporting evidence"
+    - regex: "surgery\\s+(is|is clearly|definitely)\\s+(required|indicated|recommended)"
+      reason: "unsupported surgery recommendation"
+    - regex: "\\d+%\\s+chance"
+      reason: "unsupported numeric probability language"
+  # Mandatory content when the corresponding condition holds.
+  required_content:
+    - condition: "any_low_confidence"
+      regex: "low[- ]confidenc"
+      reason: "low-confidence findings must be disclosed"
+    - condition: "any_contradiction"
+      regex: "not\\s+corroborated|inconsistent|contradict|indeterminate"
+      reason: "contradictions must be disclosed"
+    - condition: "risk_available_false"
+      regex: "(not\\s+(available|be|reliably)|cannot\\s+be\\s+reliably)"
+      reason: "unavailable longitudinal model must be disclosed"
+    - condition: "always"
+      regex: "radiolog"
+      reason: "radiologist review must be disclosed"
+
+# ----------------------------------------------------------
+# Longitudinal risk
+# ----------------------------------------------------------
+longitudinal:
+  default_horizon_years: 5
+  # If a validated numeric longitudinal model artifact exists, set this,
+  # otherwise risk_available stays false and no numeric score is emitted.
+  risk_model_available: false
+  risk_model_path: "checkpoints/longitudinal_model.pth"
+
+# ----------------------------------------------------------
+# Audit logging
+# ----------------------------------------------------------
+audit:
+  enabled: true
+  log_dir: "logs"
+  include_patient_identifier: false   # never log raw PHI

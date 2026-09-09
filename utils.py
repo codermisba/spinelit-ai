@@ -277,15 +277,123 @@ def _load_font(size: int):
         return ImageFont.load_default()
 
 
+# ---- Thin-line anatomical overlay ---------------------------------
+#
+# The model predicts 10 keypoints (5 vertebra centres + 5 disc
+# centres), NOT a pixel segmentation mask. To give the output image a
+# readable "segmented vertebrae" appearance we render a THIN-LINE
+# schematic that is derived *only* from the detected keypoints:
+#
+#   * one thin outline rectangle per vertebra body (bounds = the
+#     detected disc centres above/below the vertebra centre),
+#   * thin axis lines connecting consecutive vertebra centres,
+#   * thin horizontal offset lines = the exact horizontal displacement
+#     used by `compute_geometric_indicators` for listhesis detection.
+#
+# This is a landmark-derived schematic overlay — it is NOT a learned
+# segmentation mask and must not be presented as one.
+# --------------------------------------------------------------------
+
+ANATOMY_LINE_WIDTH = 1          # thin lines only
+DRAW_ANATOMY_THIN_LINES = True
+
+BODY_OUTLINE_COLOUR = (80, 200, 255)    # light blue - vertebra bodies
+AXIS_LINE_COLOUR = (130, 230, 130)      # green - spinal column axis
+OFFSET_LINE_COLOUR = (255, 195, 60)     # amber - horizontal displacement
+
+
+def _anatomy_body_rects(vert_px: np.ndarray, disc_px: np.ndarray,
+                        mean_distance: float) -> list[list[float]]:
+    """
+    Derive a thin rectangular outline for each vertebra body from the
+    detected vertebra centres and the two adjacent disc centres.
+    """
+    rects = []
+    half_w = 0.5 * mean_distance * 0.92
+    n = len(vert_px)
+    for i in range(n):
+        cx, cy = float(vert_px[i][0]), float(vert_px[i][1])
+        if i == 0:
+            top_y = cy - (float(disc_px[0][1]) - cy)     # mirror above L1/L2
+            bottom_y = float(disc_px[0][1])
+        elif i < n - 1:
+            top_y = float(disc_px[i - 1][1])
+            bottom_y = float(disc_px[i][1])
+        else:
+            top_y = float(disc_px[i - 1][1])
+            bottom_y = cy + (cy - float(disc_px[i - 1][1]))  # mirror below
+        half_h = max((bottom_y - top_y) / 2.0, mean_distance * 0.2)
+        rects.append([cx - half_w, cy - half_h, cx + half_w, cy + half_h])
+    return rects
+
+
+def draw_thin_anatomy_overlay(image, coords) -> Image.Image:
+    """
+    Draw only the thin-line anatomical schematic (vertebra outlines,
+    column axis, offset lines) on the ORIGINAL image dimensions.
+
+    Derived solely from the 10 detected keypoints; no segmentation-model
+    output is implied.
+    """
+    pil_image = _to_pil_image(image)
+    width, height = pil_image.size
+    points_px = norm_to_pixels(coords, width, height).astype(np.float64)
+
+    vertebra_px = points_px[:len(VERTEBRAE)]
+    disc_px = points_px[len(VERTEBRAE):]
+
+    distances = [
+        float(np.linalg.norm(vertebra_px[i + 1] - vertebra_px[i]))
+        for i in range(len(VERTEBRAE) - 1)
+    ]
+    if not distances or np.mean(distances) < 1e-6:
+        return pil_image
+
+    mean_distance = float(np.mean(distances))
+    draw = ImageDraw.Draw(pil_image, "RGBA")
+
+    # 1. Thin vertebra-body outlines.
+    for rect in _anatomy_body_rects(vertebra_px, disc_px, mean_distance):
+        draw.rectangle(rect, outline=BODY_OUTLINE_COLOUR + (255,),
+                       width=ANATOMY_LINE_WIDTH)
+
+    # 2. Thin spinal-column axis connecting consecutive vertebra centres.
+    for i in range(len(VERTEBRAE) - 1):
+        p0 = (int(vertebra_px[i][0]), int(vertebra_px[i][1]))
+        p1 = (int(vertebra_px[i + 1][0]), int(vertebra_px[i + 1][1]))
+        draw.line([p0, p1], fill=AXIS_LINE_COLOUR + (200,),
+                  width=ANATOMY_LINE_WIDTH)
+
+    # 3. Thin horizontal offset lines (the exact displacement used for
+    #    listhesis geometry) with the measured offset ratio label.
+    font = _load_font(14)
+    for i in range(len(VERTEBRAE) - 1):
+        y = (float(vertebra_px[i][1]) + float(vertebra_px[i + 1][1])) / 2.0
+        x0, x1 = (float(vertebra_px[i][0]), float(vertebra_px[i + 1][0]))
+        offset = abs(x0 - x1) / mean_distance
+        draw.line([(int(x0), int(y)), (int(x1), int(y))],
+                  fill=OFFSET_LINE_COLOUR + (255,), width=ANATOMY_LINE_WIDTH)
+        draw.text((int((x0 + x1) / 2) - 6, int(y) - 16),
+                  f"off {offset:.2f}", fill=OFFSET_LINE_COLOUR + (255,),
+                  font=font, stroke_width=1, stroke_fill=(0, 0, 0, 200))
+
+    return pil_image
+
+
 def draw_landmarks(
     image,
     coords,
     confidence=None,
     ground_truth=None,
+    anatomy_lines: bool = DRAW_ANATOMY_THIN_LINES,
 ) -> Image.Image:
     """
     Draw all 10 landmark predictions (vertebrae as circles, discs as
     diamonds) on the ORIGINAL image with per-point confidence labels.
+
+    When `anatomy_lines` is True (default) a thin-line vertebra-body
+    outline + column-axis + offset-line schematic (derived purely from
+    the detected keypoints) is drawn underneath first.
     """
     pil_image = _to_pil_image(image)
     width, height = pil_image.size
@@ -302,6 +410,14 @@ def draw_landmarks(
     num_vertebrae = len(VERTEBRAE)
 
     draw = ImageDraw.Draw(pil_image, "RGBA")
+
+    # Thin-line anatomical schematic first (under the markers).
+    if anatomy_lines:
+        try:
+            pil_image = draw_thin_anatomy_overlay(pil_image, coords)
+        except Exception:  # noqa: BLE001 - overlay must never crash the view
+            pass
+        draw = ImageDraw.Draw(pil_image, "RGBA")
 
     font = _load_font(20)
 
@@ -361,7 +477,8 @@ def draw_landmarks(
     legend_font = _load_font(16)
     x, y = 12, 12
     entries = [("Vertebra centre", VERTEBRA_COLOURS[0], "circle"),
-               ("Disc centre", DISC_COLOURS[0], "diamond")]
+               ("Disc centre", DISC_COLOURS[0], "diamond"),
+               ("Vertebra outline (thin lines)", BODY_OUTLINE_COLOUR, "line")]
     if gt_pixels is not None:
         entries.append(("Ground truth", GROUND_TRUTH_COLOUR, "ring"))
 
@@ -377,6 +494,9 @@ def draw_landmarks(
         elif marker == "ring":
             draw.ellipse([x + 1, y - 3, x + 13, y + 9],
                          outline=colour + (255,), width=3)
+        elif marker == "line":
+            draw.line([(x + 1, y + 2), (x + 13, y + 2)],
+                      fill=colour + (255,), width=1)
         else:
             draw.ellipse([x + 1, y - 3, x + 13, y + 9], fill=colour + (255,))
         draw.text((x + 22, y - 2), text, fill=(255, 255, 255),

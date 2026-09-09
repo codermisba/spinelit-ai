@@ -28,6 +28,7 @@ checkpoints/*.pt
 # exported with: python export_release.py
 !checkpoints/release_model.pth
 logs/*.csv
+logs/*.jsonl
 outputs/
 
 # Gradio runtime artifacts

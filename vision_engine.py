@@ -77,12 +77,27 @@ class VisionEngine:
         return decode_outputs(outputs)
 
     def analyze(self, image: Image.Image, image_name: str = "") -> EvidenceCard:
+        card, _ = self.analyze_and_draw(image, image_name=image_name)
+        return card
+
+    def analyze_and_draw(
+        self,
+        image: Image.Image,
+        image_name: str = "",
+    ) -> tuple[EvidenceCard, Image.Image]:
+        """
+        Run the vision model once and return (EvidenceCard, annotated image).
+
+        The annotated image uses `draw_landmarks(...)` with the default
+        thin-line anatomy overlay (vertebra outlines / axis / offset lines
+        derived only from the detected keypoints).
+        """
         if not self.available:
             card = EvidenceCard(
                 image_processed=False, image_name=image_name,
                 notes=[self.error or "Vision model not loaded."],
             )
-            return card
+            return card, image.convert("RGB")
 
         decoded = self._run_model(image)
         width, height = image.size
@@ -99,7 +114,12 @@ class VisionEngine:
             ddd_conf=decoded["ddd_conf"],
             image_name=image_name,
         )
-        return card
+        from utils import draw_landmarks
+        annotated = draw_landmarks(
+            image, coords=decoded["points"],
+            confidence=decoded["localization_conf"],
+        )
+        return card, annotated
 
     def extract_features(self, image: Image.Image) -> Optional[torch.Tensor]:
         if not self.available:

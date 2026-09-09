@@ -169,6 +169,66 @@ the longitudinal outlook and the radiology report.
 
 ---
 
+## Deterministic decision-support layer (safety-first)
+
+Alongside the agentic pipeline, this repo ships a **deterministic
+decision-support safety layer** (`config.yaml`,
+`structured_builder.py`, `contradiction_engine.py`, `evidence_fusion.py`,
+`confidence.py`, `longitudinal_risk.py`, `report_validator.py`,
+`pipeline_report.py`, `decision_support.py`, `audit_log.py`). It hard-wraps
+the model outputs so that:
+
+- **Confidence and evidence are never over-claimed** — raw model confidence is
+  classified LOW/MODERATE/HIGH; findings stay `LOW_CONFIDENCE_*`,
+  `INDETERMINATE`, `CONTRADICTED` or `NOT_CORROBORATED` until independent
+  geometric evidence upgrades them (and even then, "confirmed" requires the
+  evidence to explicitly support it).
+- **Geometry outranks the model** — explicitly-measured negative geometry
+  falsifies a prediction (`CONTRADICTED`, spec §8 R1); positive geometry alone
+  cannot validate slip *severity* (Grade III is downgraded to `INDETERMINATE`).
+- **No synthetic numbers** — with no validated longitudinal model, risk stays
+  `score=None` / `NOTE AVAILABLE`, and the report must disclose that.
+- **The LLM can never override the evidence** — it receives only validated
+  structured evidence; its output is rejected/regenerated when it violates
+  the configured rules and otherwise replaced by a deterministic,
+  fully-traceable conservative fallback.
+- **Everything is traceable and audited** — every finding carries evidence IDs
+  mapped to a registered evidence ledger; runs are logged to `logs/*.jsonl`
+  with PHI stripped.
+
+### CLI
+
+```bash
+python cli_decision_support.py --example --pretty --no-llm
+python cli_decision_support.py --case sample.json --no-llm --out outputs/report.json
+```
+
+The existing example shows an all-multilevel case: most model predictions
+stay low-confidence or are contradicted by geometry — exactly the honest,
+review-gated output the safety layer is designed to produce.
+
+### Tests
+
+```bash
+python -m pytest tests/ -q
+```
+
+Covers the spec §28 acceptance scenarios (Grade III vs geometry,
+contradiction, low-confidence DDD, longitudinal-risk absence, symptom
+conservatism, inadequate image quality) plus validator/LLM-fallback and the
+drawing overlay tests.
+
+### Annotated-image thin-line overlay
+
+`utils.draw_landmarks(..., anatomy_lines=True)` (default) renders a **thin
+1 px schematic** under the landmark markers: vertebra-body outlines, the
+spinal-column axis, and horizontal offset lines labelled with the measured
+offset ratio. It is derived **only** from the 10 detected keypoints — it is a
+landmark-derived schematic, not a learned segmentation mask, and is presented
+as such in the legend.
+
+---
+
 ## Imaging model (vision core)
 
 - Backbone: **ConvNeXt-Tiny** pretrained on ImageNet via `timm`, shared 512-d
@@ -191,6 +251,10 @@ for a strong final-year result.
 - [x] Agent framework (LLM client, schemas, per-agent roles)
 - [x] Calibrated probabilities + verification/critique loop
 - [x] Orchestrator, CLI, Gradio UI (degraded-mode safe)
+- [x] Deterministic decision-support safety layer (evidence fusion,
+      contradiction rules, report validation, audit trail, fallback report)
+- [x] Thin-line anatomical overlay on annotated images (keypoint-derived)
+- [x] Test suite for the §28 decision-support acceptance scenarios
 - [ ] Train localizer + DDD head on labelled data (Colab)
 - [ ] Fit calibration from labels; report calibration curves / AUROC
 - [ ] Extend to additional spine diseases / 3D (MRI) inputs
