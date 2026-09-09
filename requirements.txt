@@ -23,6 +23,10 @@ Pillow
 scikit-learn
 tqdm
 
+# MRI volume parsing (prepare_spider.py needs this to read the .mha files;
+# without it every SPIDER case is skipped and the landmark CSVs come out empty)
+SimpleITK
+
 # Structured agent outputs
 pydantic
 

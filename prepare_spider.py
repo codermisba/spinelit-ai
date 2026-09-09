@@ -130,6 +130,17 @@ def _download(data_dir: Path) -> None:
             (target / "masks").rmdir()
 
 
+def _require_simpleitk() -> None:
+    try:
+        import SimpleITK  # noqa: F401
+    except ImportError as exc:
+        raise SystemExit(
+            "SimpleITK is required to read the SPIDER .mha volumes.\n"
+            "Install it first:  pip install SimpleITK\n"
+            "(checkout/colab_training.ipynb cell 4 does this automatically.)"
+        ) from exc
+
+
 def _load_volume(path: Path):
     import SimpleITK as sitk
     img = sitk.ReadImage(str(path))
@@ -229,12 +240,18 @@ def main() -> None:
     args = ap.parse_args()
 
     data_dir = Path(args.data_dir)
+    _require_simpleitk()
     if not args.skip_download:
         _download(data_dir)
 
     images_dir = data_dir / "images"
     masks_dir = data_dir / "masks"
     gradings_csv = data_dir / "radiological_gradings.csv"
+    if not gradings_csv.exists():
+        raise SystemExit(
+            f"radiological_gradings.csv not found under {data_dir}. "
+            "This file provides the Pfirrmann ground-truth labels."
+        )
 
     if not images_dir.is_dir() or not masks_dir.is_dir():
         raise SystemExit(
@@ -278,6 +295,19 @@ def main() -> None:
     print(f"Disc landmark rows      : {len(coords_df)}")
     print(f"Pfirrmann label rows    : {len(grade_df)}")
     print(f"Images written to       : {jpg_out}")
+
+    if not used:
+        raise SystemExit(
+            "No T2/T2-SPACE cases were processed. Check that images/ contains "
+            "*_t2.mha / *_t2_SPACE.mha and that matching *_t2*.mha masks exist "
+            "in masks/."
+        )
+    if len(coords_df) == 0:
+        raise SystemExit(
+            "prepare_spider ran but produced 0 landmark rows. Check that the "
+            "segmentation masks in masks/ actually contain the lumbar disc "
+            "labels 201..205."
+        )
 
 
 if __name__ == "__main__":

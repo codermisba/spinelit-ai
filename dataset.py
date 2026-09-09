@@ -52,6 +52,12 @@ def _read_landmark_csv(csv_path: Path, key_column: str) -> pd.DataFrame | None:
         )
     df["filename"] = df["filename"].astype(str).str.strip()
     df[key_column] = df[key_column].astype(str).str.strip()
+    if len(df) == 0:
+        raise ValueError(
+            f"{csv_path} exists but has 0 annotation rows. Regenerate it with "
+            "prepare_spider.py (or train.prepare_spider) - an empty CSV will "
+            f"make training fail with a confusing 'No columns to parse' error."
+        )
     return df
 
 
