@@ -96,6 +96,17 @@ class Trainer:
         print("\nLoading Dataset...")
         self.dataset = SpineDataset()
         print(f"Dataset Loaded  ->  Images : {len(self.dataset)}")
+
+        # Diagnostic: how many of those annotated files actually exist on disk?
+        n_on_disk = sum(
+            1 for fn in self.dataset.image_names
+            if any((d / fn).exists() for d in self.dataset.image_dirs)
+        )
+        if n_on_disk < len(self.dataset.image_names):
+            print(
+                f"[warn] Only {n_on_disk}/{len(self.dataset.image_names)} annotated "
+                "images were found on disk - labels exist without JPG files."
+            )
         print(f"DDD (Pfirrmann) labels available : {self.dataset.has_ddd_labels}")
 
         # DDD task enabled only when Pfirrmann labels exist
@@ -229,14 +240,39 @@ class Trainer:
 
         print("\nPreparing Train / Validation Split...")
 
-        labels = self._split_labels()
+        n_images = len(self.dataset.image_names)
+        if n_images < 10:
+            raise SystemExit(
+                f"Only {n_images} unique images in coords_pretrain.csv - too few "
+                "to train/split. Re-run cell 7b (prepare_spider.py) on the full "
+                "SPIDER dataset; it should produce thousands of landmark rows. "
+                "Check the 'Landmark rows:' / 'T2/T2-SPACE series used:' lines it "
+                "printed just now."
+            )
 
-        splitter = StratifiedShuffleSplit(
-            n_splits=1, test_size=0.20, random_state=42,
-        )
-        train_idx, val_idx = next(
-            splitter.split(self.dataset.image_names, labels)
-        )
+        labels = self._split_labels()
+        n_classes = len(set(labels))
+
+        # StratifiedShuffleSplit requires n_test >= n_classes. With tiny datasets
+        # we fall back to a random split instead of crashing.
+        n_val = n_images - int(n_images * 0.80)
+        if n_images >= 20 and n_val >= n_classes:
+            splitter = StratifiedShuffleSplit(
+                n_splits=1, test_size=0.20, random_state=42,
+            )
+            train_idx, val_idx = next(
+                splitter.split(self.dataset.image_names, labels)
+            )
+        else:
+            if n_images < 100:
+                print(
+                    f"[warn] Only {n_images} images across {n_classes} classes - "
+                    "using a random split (no stratification)."
+                )
+            perm = torch.randperm(n_images, generator=torch.Generator().manual_seed(42))
+            n_val = max(1, int(round(0.20 * n_images)))
+            val_idx = perm[:n_val].tolist()
+            train_idx = perm[n_val:].tolist()
 
         self.train_loader = DataLoader(
             Subset(self.dataset, train_idx),

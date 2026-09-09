@@ -72,12 +72,21 @@ def _shrink_rare_labels(labels):
 
 
 def build_val_indices(dataset: SpineDataset) -> np.ndarray:
-    """Recompute the same stratified validation split used by train.py."""
+    """Recompute the same validation split used by train.py (falls back to
+    a random split for tiny datasets, matching train.py's behaviour)."""
     labels = _split_labels(dataset)
-    splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.20,
-                                      random_state=42)
-    _, val_idx = next(splitter.split(dataset.image_names, labels))
-    return val_idx
+    n_images = len(dataset.image_names)
+    n_classes = len(set(labels))
+    n_val = n_images - int(n_images * 0.80)
+    if n_images >= 20 and n_val >= n_classes:
+        splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.20,
+                                          random_state=42)
+        _, val_idx = next(splitter.split(dataset.image_names, labels))
+        return val_idx
+    rng = np.random.RandomState(42)
+    perm = rng.permutation(n_images)
+    n_val = max(1, int(round(0.20 * n_images)))
+    return perm[:n_val]
 
 
 @torch.no_grad()
