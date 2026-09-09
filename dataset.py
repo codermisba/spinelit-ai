@@ -40,6 +40,22 @@ from config import (
 )
 
 
+def _maybe_flip_augment(image_tensor, coords_tensor, p: float = 0.5, rng=None):
+    """
+    Training-only horizontal-flip augmentation: mirrors the image and the
+    landmark x-coordinates together (sagittal spine is bilateral-symmetric).
+    `rng` is `numpy.random.RandomState`-like; inject a seedable one in tests.
+    """
+    if rng is None:
+        rng = np.random.RandomState()
+    if rng.rand() >= p:
+        return image_tensor, coords_tensor
+    flipped = torch.flip(image_tensor, dims=[2])
+    coords = coords_tensor.clone()
+    coords[0::2] = 1.0 - coords[0::2]
+    return flipped, coords
+
+
 def _read_landmark_csv(csv_path: Path, key_column: str) -> pd.DataFrame | None:
     """Load a long-format landmark CSV (filename,key,relative_x,relative_y)."""
     if not csv_path.exists():
@@ -69,6 +85,7 @@ class SpineDataset(Dataset):
         vertebra_annotation_file=VERTEBRA_LANDMARK_CSV,
         ddd_labels_file=DDD_LABELS_CSV,
         transform=None,
+        augment: bool = False,
     ):
 
         self.disc_csv = _read_landmark_csv(Path(disc_annotation_file), "level")
@@ -76,6 +93,8 @@ class SpineDataset(Dataset):
             raise FileNotFoundError(
                 f"Disc landmark annotations not found: {disc_annotation_file}"
             )
+
+        self.augment = augment
 
         self.vert_csv = _read_landmark_csv(
             Path(vertebra_annotation_file), "vertebra"
@@ -285,9 +304,13 @@ class SpineDataset(Dataset):
         image = Image.open(image_path).convert("RGB")
         image = self.transform(image)
 
+        coords_t = torch.tensor(coords, dtype=torch.float32)
+        if self.augment:
+            image, coords_t = _maybe_flip_augment(image, coords_t)
+
         return {
             "image": image,
-            "coords": torch.tensor(coords, dtype=torch.float32),
+            "coords": coords_t,
             "point_visible": visibility,
             "ddd_class": ddd_class,
             "ddd_mask": ddd_mask,

@@ -97,6 +97,16 @@ class Trainer:
         self.dataset = SpineDataset()
         print(f"Dataset Loaded  ->  Images : {len(self.dataset)}")
 
+        # Training views the same data with on-the-fly horizontal-flip
+        # augmentation (mirrors image + landmark x together); validation is
+        # always clean. Both share the same image ordering.
+        self.train_dataset = SpineDataset(augment=True)
+        if self.train_dataset.image_names != self.dataset.image_names:
+            raise RuntimeError(
+                "Augmented train dataset must use the same image ordering."
+            )
+        print("Data augmentation : horizontal flip (training split only)")
+
         # Diagnostic: how many of those annotated files actually exist on disk?
         n_on_disk = sum(
             1 for fn in self.dataset.image_names
@@ -275,7 +285,7 @@ class Trainer:
             train_idx = perm[n_val:].tolist()
 
         self.train_loader = DataLoader(
-            Subset(self.dataset, train_idx),
+            Subset(self.train_dataset, train_idx),
             batch_size=BATCH_SIZE,
             shuffle=True,
             num_workers=NUM_WORKERS,

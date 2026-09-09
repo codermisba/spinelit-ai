@@ -327,10 +327,17 @@ def _anatomy_body_rects(vert_px: np.ndarray, disc_px: np.ndarray,
     return rects
 
 
-def draw_thin_anatomy_overlay(image, coords) -> Image.Image:
+def draw_thin_anatomy_overlay(
+    image,
+    coords,
+    offset_labels: bool = True,
+) -> Image.Image:
     """
     Draw only the thin-line anatomical schematic (vertebra outlines,
     column axis, offset lines) on the ORIGINAL image dimensions.
+
+    `offset_labels=False` skips the per-pair "off 0.xx" text (used by
+    the combined landmark view to keep the image uncluttered).
 
     Derived solely from the 10 detected keypoints; no segmentation-model
     output is implied.
@@ -373,11 +380,27 @@ def draw_thin_anatomy_overlay(image, coords) -> Image.Image:
         offset = abs(x0 - x1) / mean_distance
         draw.line([(int(x0), int(y)), (int(x1), int(y))],
                   fill=OFFSET_LINE_COLOUR + (255,), width=ANATOMY_LINE_WIDTH)
-        draw.text((int((x0 + x1) / 2) - 6, int(y) - 16),
-                  f"off {offset:.2f}", fill=OFFSET_LINE_COLOUR + (255,),
-                  font=font, stroke_width=1, stroke_fill=(0, 0, 0, 200))
+        if offset_labels:
+            draw.text((int((x0 + x1) / 2) - 6, int(y) - 16),
+                      f"off {offset:.2f}", fill=OFFSET_LINE_COLOUR + (255,),
+                      font=font, stroke_width=1, stroke_fill=(0, 0, 0, 200))
 
     return pil_image
+
+
+def _position_label_boxes(placements, width: int, height: int):
+    """
+    Group label boxes by side, sort top-to-bottom and push overlapping
+    neighbours apart so stacked labels never collide on the same side.
+    """
+    for side in ("right", "left"):
+        group = sorted((p for p in placements if p["side"] == side),
+                       key=lambda p: p["y0"])
+        for a, b in zip(group, group[1:]):
+            gap = a["y1"] + 4 - b["y0"]
+            if gap > 0:
+                b["y0"] += gap
+                b["y1"] += gap
 
 
 def draw_landmarks(
@@ -388,8 +411,14 @@ def draw_landmarks(
     anatomy_lines: bool = DRAW_ANATOMY_THIN_LINES,
 ) -> Image.Image:
     """
-    Draw all 10 landmark predictions (vertebrae as circles, discs as
-    diamonds) on the ORIGINAL image with per-point confidence labels.
+    Draw all 10 predicted landmarks on the ORIGINAL image with a clean,
+    non-overlapping overlay:
+
+    * vertebrae as white-ringed circles, discs as white-ringed diamonds,
+    * per-point labels (e.g. "L1  0.98") in dark rounded boxes on thin
+      leader lines, alternating left/right with collision avoidance,
+    * ground-truth as thin dashed-looking rings when provided,
+    * a compact legend.
 
     When `anatomy_lines` is True (default) a thin-line vertebra-body
     outline + column-axis + offset-line schematic (derived purely from
@@ -398,110 +427,149 @@ def draw_landmarks(
     pil_image = _to_pil_image(image)
     width, height = pil_image.size
 
-    pred_pixels = norm_to_pixels(coords, width, height)
+    pred_pixels = norm_to_pixels(coords, width, height).astype(np.float32)
 
     gt_pixels = None
     if ground_truth is not None:
-        gt_pixels = norm_to_pixels(ground_truth, width, height)
+        gt_pixels = norm_to_pixels(ground_truth, width, height).astype(np.float32)
 
     if confidence is not None:
         confidence = np.asarray(confidence, dtype=np.float32).reshape(-1)
 
     num_vertebrae = len(VERTEBRAE)
 
-    draw = ImageDraw.Draw(pil_image, "RGBA")
-
     # Thin-line anatomical schematic first (under the markers).
     if anatomy_lines:
         try:
-            pil_image = draw_thin_anatomy_overlay(pil_image, coords)
+            pil_image = draw_thin_anatomy_overlay(
+                pil_image, coords, offset_labels=False
+            )
         except Exception:  # noqa: BLE001 - overlay must never crash the view
             pass
-        draw = ImageDraw.Draw(pil_image, "RGBA")
 
-    font = _load_font(20)
+    draw = ImageDraw.Draw(pil_image, "RGBA")
+    marker_r = 6
+    label_font = _load_font(15)
 
-    def _label_point(px, py, text, colour, marker="circle"):
-        if marker == "diamond":
-            r = 9
-            draw.polygon(
-                [(px, py - r), (px + r, py), (px, py + r), (px - r, py)],
-                fill=colour + (255,),
-                outline=(0, 0, 0),
-            )
-        else:
-            r = 10
-            draw.ellipse(
-                [px - r, py - r, px + r, py + r],
-                fill=colour + (255,),
-                outline=(0, 0, 0),
-                width=2,
-            )
-
-        text_x = min(px + r + 5, width - 10)
-        text_y = min(py - r - 4, max(4, height - 30))
-        draw.text(
-            (text_x, text_y), text,
-            fill=colour + (255,), font=font,
-            stroke_width=2, stroke_fill=(0, 0, 0),
-        )
-
-    # Ground truth first (predictions stay on top)
+    # Ground truth rings (underneath predictions).
     if gt_pixels is not None:
         for px, py in gt_pixels:
-            draw.ellipse(
-                [px - 9, py - 9, px + 9, py + 9],
-                outline=GROUND_TRUTH_COLOUR + (255,), width=3,
-            )
+            draw.ellipse([px - 9, py - 9, px + 9, py + 9],
+                         outline=(0, 0, 0, 255), width=4)
+            draw.ellipse([px - 9, py - 9, px + 9, py + 9],
+                         outline=GROUND_TRUTH_COLOUR + (255,), width=2)
 
+    # Markers + label box placement.
+    placements = []
     for i, (px, py) in enumerate(pred_pixels):
-
         is_vertebra = i < num_vertebrae
-
         colour = (
             VERTEBRA_COLOURS[i % len(VERTEBRA_COLOURS)]
             if is_vertebra
             else DISC_COLOURS[(i - num_vertebrae) % len(DISC_COLOURS)]
         )
 
-        label = ALL_POINTS[i]
+        text = ALL_POINTS[i]
         if confidence is not None and i < len(confidence):
-            label += f" {confidence[i]:.2f}"
+            text += f"  {confidence[i]:.2f}"
 
-        _label_point(
-            px, py, label, colour,
-            marker="circle" if is_vertebra else "diamond",
-        )
+        # White-ringed coloured markers (read on dark and bright MRI alike).
+        if is_vertebra:
+            draw.ellipse([px - marker_r, py - marker_r,
+                          px + marker_r, py + marker_r],
+                         fill=(255, 255, 255, 255), outline=(0, 0, 0, 255),
+                         width=1)
+            draw.ellipse([px - marker_r + 2, py - marker_r + 2,
+                          px + marker_r - 2, py + marker_r - 2],
+                         fill=colour + (255,))
+        else:
+            r = marker_r + 1
+            draw.polygon([(px, py - r), (px + r, py), (px, py + r),
+                          (px - r, py)], fill=(255, 255, 255, 255))
+            draw.polygon([(px, py - r + 2), (px + r - 2, py),
+                          (px, py + r - 2), (px - r + 2, py)],
+                         fill=colour + (255,))
+
+        # Label side: alternate, but flip when the point hugs an image edge.
+        side = "right" if i % 2 == 0 else "left"
+        if px - 30 < 0:
+            side = "right"
+        elif px + 30 > width:
+            side = "left"
+
+        bbox = draw.textbbox((0, 0), text, font=label_font)
+        tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        box_h = th + 10
+        box_w = tw + 18
+        pad = 14
+
+        cy = int(round(float(py)))
+        if side == "right":
+            x1 = min(int(round(px)) + marker_r + pad + box_w, width - 8)
+            x0 = x1 - box_w
+        else:
+            x0 = max(int(round(px)) - marker_r - pad - box_w, 8)
+            x1 = x0 + box_w
+
+        placements.append({
+            "px": int(round(float(px))), "py": cy, "side": side,
+            "x0": x0, "x1": x1,
+            "y0": cy - box_h // 2, "y1": cy + box_h // 2,
+            "colour": colour, "text": text,
+        })
+
+    _position_label_boxes(placements, width, height)
+
+    for p in placements:
+        px, py = p["px"], p["py"]
+        leader_end = (p["x0"] if p["side"] == "right" else p["x1"],
+                      (p["y0"] + p["y1"]) // 2)
+        leader_start = (px + marker_r if p["side"] == "right"
+                        else px - marker_r, py)
+        draw.line([leader_start, leader_end],
+                  fill=p["colour"] + (160,), width=1)
+        draw.rounded_rectangle([p["x0"], p["y0"], p["x1"], p["y1"]],
+                               radius=6, fill=(8, 8, 8, 200),
+                               outline=p["colour"] + (255,), width=1)
+        draw.text((p["x0"] + 8, p["y0"] + 5), p["text"],
+                  fill=(255, 255, 255, 255), font=label_font)
 
     # Legend
-    legend_font = _load_font(16)
+    legend_font = _load_font(14)
     x, y = 12, 12
-    entries = [("Vertebra centre", VERTEBRA_COLOURS[0], "circle"),
-               ("Disc centre", DISC_COLOURS[0], "diamond"),
+    entries = [("Vertebra", VERTEBRA_COLOURS[0], "circle"),
+               ("Disc", DISC_COLOURS[0], "diamond"),
                ("Vertebra outline (thin lines)", BODY_OUTLINE_COLOUR, "line")]
     if gt_pixels is not None:
         entries.append(("Ground truth", GROUND_TRUTH_COLOUR, "ring"))
 
     box_w = max(draw.textbbox((0, 0), t, font=legend_font)[2]
                 for t, _, _ in entries) + 46
-    box_h = 26 * len(entries) + 12
-    draw.rectangle([x - 6, y - 6, x + box_w, y + box_h], fill=(0, 0, 0, 200))
+    box_h = 24 * len(entries) + 12
+    draw.rounded_rectangle([x - 6, y - 6, x + box_w, y + box_h],
+                           radius=8, fill=(8, 8, 8, 190))
 
     for text, colour, marker in entries:
         if marker == "diamond":
             draw.polygon([(x + 7, y - 3), (x + 13, y + 3), (x + 7, y + 9),
-                          (x + 1, y + 3)], fill=colour + (255,))
+                          (x + 1, y + 3)], fill=(255, 255, 255, 255))
+            draw.polygon([(x + 8, y - 2), (x + 12, y + 3), (x + 8, y + 8),
+                          (x + 4, y + 3)], fill=colour + (255,))
         elif marker == "ring":
-            draw.ellipse([x + 1, y - 3, x + 13, y + 9],
-                         outline=colour + (255,), width=3)
+            draw.ellipse([x + 1, y - 4, x + 15, y + 10],
+                         outline=(255, 255, 255, 255), width=2)
+            draw.ellipse([x + 2, y - 3, x + 14, y + 9],
+                         outline=colour + (255,), width=1)
         elif marker == "line":
-            draw.line([(x + 1, y + 2), (x + 13, y + 2)],
+            draw.line([(x + 1, y + 2), (x + 15, y + 2)],
                       fill=colour + (255,), width=1)
         else:
-            draw.ellipse([x + 1, y - 3, x + 13, y + 9], fill=colour + (255,))
-        draw.text((x + 22, y - 2), text, fill=(255, 255, 255),
+            draw.ellipse([x + 1, y - 4, x + 15, y + 10],
+                         fill=(255, 255, 255, 255))
+            draw.ellipse([x + 3, y - 2, x + 13, y + 8], fill=colour + (255,))
+        draw.text((x + 22, y - 1), text, fill=(255, 255, 255, 255),
                   font=legend_font)
-        y += 26
+        y += 24
 
     return pil_image
 

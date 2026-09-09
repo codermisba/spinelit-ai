@@ -74,3 +74,31 @@ def test_degenerate_coords_does_not_crash():
     coords = np.ones((10, 2), dtype=np.float32) * 0.5   # all points identical
     out = draw_thin_anatomy_overlay(img, coords)
     assert out.size == img.size
+
+
+def test_draw_landmarks_labels_do_not_leave_the_canvas():
+    """Every label box must stay inside the image (clamping + layout)."""
+    img = _blank_image()
+    coords = _dummy_coords()
+    coords[0, 0] = 0.005   # L1 tucked against the left edge
+    out = np.asarray(draw_landmarks(img, coords, confidence=[0.9] * 10))
+    assert out.shape[:2] == (512, 512)
+
+
+def test_overlay_offset_labels_can_be_suppressed():
+    """Combined view keeps the thin offset lines but drops the 'off 0.xx' text."""
+    from utils import OFFSET_LINE_COLOUR
+    img = _blank_image()
+    coords = _dummy_coords()
+    # Wobble the vertebra centres sideways so the offset lines have length.
+    for i in range(5):
+        coords[i, 0] += (0.03 if i % 2 == 0 else -0.03)
+    with_text = np.asarray(draw_thin_anatomy_overlay(img, coords))
+    no_text = np.asarray(
+        draw_thin_anatomy_overlay(img, coords, offset_labels=False)
+    )
+    # The amber offset lines are still drawn in both variants.
+    target = np.array(OFFSET_LINE_COLOUR, dtype=np.uint8)
+    assert (no_text.reshape(-1, 3) == target).all(axis=-1).sum() > 100
+    # Text pixels change when labels are suppressed (glyph area differs).
+    assert int((with_text != no_text).any(axis=-1).sum()) > 0
