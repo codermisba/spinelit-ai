@@ -290,6 +290,7 @@ class Trainer:
             shuffle=True,
             num_workers=NUM_WORKERS,
             pin_memory=torch.cuda.is_available(),
+            drop_last=True,   # never feed a 1-sample batch to BatchNorm heads
         )
         self.val_loader = DataLoader(
             Subset(self.dataset, val_idx),
