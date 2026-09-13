@@ -141,7 +141,13 @@ def main() -> None:
     ok = 0
     for img_path in image_files:
         mask_path = masks_dir / img_path.name
-        if not mask_path.exists():
+        try:
+            has_mask = mask_path.exists()
+        except OSError as exc:  # Drive FUSE can drop mid-run
+            skips["drive_fuse_lost"] = skips.get("drive_fuse_lost", 0) + 1
+            print(f"  [skip] {img_path.name}: Drive read failed: {exc}")
+            continue
+        if not has_mask:
             skips["missing_mask"] = skips.get("missing_mask", 0) + 1
             continue
         if convert_case(img_path, mask_path, images_tr, labels_tr, skips):
