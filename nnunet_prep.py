@@ -116,9 +116,26 @@ def main() -> None:
     images_tr.mkdir(parents=True, exist_ok=True)
     labels_tr.mkdir(parents=True, exist_ok=True)
 
+    # Write dataset.json FIRST so verify_dataset_integrity never fails on a
+    # missing file even when the loop below finds nothing to convert.
+    def _write_json(num_training: int) -> None:
+        dataset_json = {
+            "channel_names": {"0": "T2"},
+            "labels": {"background": 0, "vertebra": 1, "disc": 2,
+                       "spinal_canal": 3},
+            "numTraining": num_training,
+            "file_ending": ".nii.gz",
+            "overwrite_image_reader_writer": "SimpleITKIO",
+        }
+        (ds_dir / "dataset.json").write_text(json.dumps(dataset_json, indent=2))
+
+    _write_json(0)
+
     image_files = sorted(images_dir.glob("*.mha"))
     if not image_files:
-        raise SystemExit(f"No .mha volumes in {images_dir}")
+        raise SystemExit(f"No .mha volumes under {images_dir}. "
+                         f"Is SPIDER_data mounted where the notebook expects it? "
+                         f"(run: import os; print(os.listdir('/content/drive/MyDrive')))")
 
     skips: dict = {}
     ok = 0
@@ -130,15 +147,7 @@ def main() -> None:
         if convert_case(img_path, mask_path, images_tr, labels_tr, skips):
             ok += 1
 
-    dataset_json = {
-        "channel_names": {"0": "T2"},
-        "labels": {"background": 0, "vertebra": 1, "disc": 2,
-                   "spinal_canal": 3},
-        "numTraining": ok,
-        "file_ending": ".nii.gz",
-        "overwrite_image_reader_writer": "SimpleITKIO",
-    }
-    (ds_dir / "dataset.json").write_text(json.dumps(dataset_json, indent=2))
+    _write_json(ok)
 
     print(f"Converted        : {ok} / {len(image_files)} cases")
     print(f"Dataset folder   : {ds_dir}")
