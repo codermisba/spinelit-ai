@@ -16,7 +16,7 @@ Mask label legend (SPIDER):
     1-25  = vertebrae, numbered from bottom (1 = L5 .. 5 = L1)
     100   = spinal canal
     101-125 = partially visible vertebrae
-    201-225 = intervertebral discs, numbered from bottom (201 = L5/S1 ..)
+    201-225 = intervertebral discs, numbered from top (201 = most superior)
 
 What this script produces (the exact inputs SpineDataset expects):
   dataset/data/processed_spider_jpgs/<id>_mid.jpg   midsagittal T2/T2-SPACE JPG
@@ -33,13 +33,16 @@ top-left), matching the dataset loader.
 
 Level numbering
 ---------------
-SPIDER numbers everything *bottom-up*:
-    mask disc  201 -> L5/S1, 202 -> L4/L5, 203 -> L3/L4, 204 -> L2/L3,
-                205 -> L1/L2
-radiology "IVD label"  0 -> L5/S1, 1 -> L4/L5, 2 -> L3/L4, 3 -> L2/L3,
-                4 -> L1/L2
-We re-map to the pipeline's top-down order [L1/L2, L2/L3, L3/L4, L4/L5,
-L5/S1].
+SPIDER numbers discs *top-down* (verified empirically on real data):
+    the highest disc label in a patient's mask = L5/S1, the next lower
+    label = L4/L5, etc.  Patients show 5 lumbar discs (labels 201-205)
+    or 6 when T12/L1 is included (labels 201-206 -> 202-206 are the
+    lumbar L1/L2..L5/S1, and 201 = T12/L1 is dropped).
+The radiology "IVD label" column uses the same convention: 1-based,
+top-down, so the highest IVD label for the patient = L5/S1.
+Mappings are therefore built dynamically per patient (see
+_build_disc_label_to_level / _build_ivd_label_to_level) and emit the
+pipeline's top-down order [L1/L2, L2/L3, L3/L4, L4/L5, L5/S1].
 
 Radiology CSV columns: Patient, IVD label, Modic, UP endplate, LOW
 endplate, Spondylolisthesis, Disc herniation, Disc narrowing, Disc bulging,
@@ -78,14 +81,53 @@ FILES = {
 # Which scan types to train on (sagittal T2-weighted and T2-SPACE).
 SCAN_TYPES = ("t2", "t2_SPACE")
 
-# Mask disc label (bottom-up) -> pipeline disc level.
-MASK_DISC_TO_LEVEL = {
-    201: "L5/S1", 202: "L4/L5", 203: "L3/L4", 204: "L2/L3", 205: "L1/L2",
-}
-# Radiology IVD label (bottom-up) -> pipeline disc level.
-IVD_LABEL_TO_LEVEL = {
-    0: "L5/S1", 1: "L4/L5", 2: "L3/L4", 3: "L2/L3", 4: "L1/L2",
-}
+# Mask disc labels are TOP-DOWN (201 = most superior disc, highest label
+# number = most inferior = L5/S1).  The number of labels varies per patient
+# (5 for lumbar-only, 6 when T12/L1 is included).
+# We build the mapping dynamically per patient rather than hard-coding it.
+_DISC_LABEL_OFFSET = 200   # mask disc labels start at 201 = offset + 1
+
+
+def _build_disc_label_to_level(mask_vol: np.ndarray) -> dict[int, str]:
+    """
+    Given a mask volume, find all disc labels (201-225), determine which
+    is L5/S1 (the highest label number = most inferior), and return a
+    mapping {label_int: level_name} for the 5 lumbar disc levels.
+    Labels above L1/L2 (e.g. T12/L1) are excluded from the mapping.
+    """
+    present = sorted(int(lb) for lb in np.unique(mask_vol)
+                     if _DISC_LABEL_OFFSET < lb < _DISC_LABEL_OFFSET + 26)
+    if not present:
+        return {}
+    max_label = present[-1]          # highest label = L5/S1
+    mapping = {}
+    for label in present:
+        idx = max_label - label      # 0 = L5/S1 (last in DISC_LEVELS)
+        if 0 <= idx < len(DISC_LEVELS):
+            mapping[label] = DISC_LEVELS[-(idx + 1)]   # top-down ordering
+    return mapping
+
+
+def _build_ivd_label_to_level(gradings_df: pd.DataFrame,
+                              patient_id: str) -> dict[int, str]:
+    """
+    For a patient's radiological gradings, find all IVD labels (1-based),
+    determine which is L5/S1 (highest IVD number), and return a mapping
+    {ivd_label_int: level_name} for the 5 lumbar disc levels.
+    """
+    pat = gradings_df[gradings_df["Patient"].astype(str) == str(patient_id)]
+    if pat.empty:
+        return {}
+    ivd_labels = sorted(pat["IVD label"].dropna().astype(int).unique())
+    if not ivd_labels:
+        return {}
+    max_ivd = ivd_labels[-1]        # highest IVD label = L5/S1
+    mapping = {}
+    for lb in ivd_labels:
+        idx = max_ivd - lb           # 0 = L5/S1 (last in DISC_LEVELS)
+        if 0 <= idx < len(DISC_LEVELS):
+            mapping[lb] = DISC_LEVELS[-(idx + 1)]   # top-down ordering
+    return mapping
 
 PFRRMANN_COL = "Pfirrman grade"   # exact column name in radiological_gradings.csv
 
@@ -199,9 +241,10 @@ def _process_case(
         arr8 = (arr8 * 255).astype(np.uint8)
         Image.fromarray(arr8).convert("L").convert("RGB").save(jpg_out / fname)
 
-        # Disc centroids from the mask (201..205 = lumbar discs).
+        # Disc centroids from the mask — dynamic mapping per patient.
+        disc_map = _build_disc_label_to_level(mask_vol)
         centroids = {}
-        for lab, level in MASK_DISC_TO_LEVEL.items():
+        for lab, level in disc_map.items():
             c = _disc_centroid_on_best_slice(image_vol, mask_vol, lab)
             if c is not None:
                 centroids[level] = c
@@ -214,10 +257,11 @@ def _process_case(
                      "relative_x": round(rx, 6), "relative_y": round(ry, 6)}
                 )
 
-        # Pfirrmann grades from the radiology CSV, keyed on patient id.
+        # Pfirrmann grades from the radiology CSV — dynamic mapping per patient.
         pat = gradings_df[gradings_df["Patient"].astype(str) == str(patient_id)]
         if not pat.empty:
-            for label, level in IVD_LABEL_TO_LEVEL.items():
+            ivd_map = _build_ivd_label_to_level(gradings_df, patient_id)
+            for label, level in ivd_map.items():
                 row = pat[pat["IVD label"].astype(str) == str(label)]
                 if row.empty:
                     continue
@@ -331,7 +375,7 @@ def main() -> None:
         raise SystemExit(
             "prepare_spider ran but produced 0 landmark rows. Check that the "
             "segmentation masks in masks/ actually contain the lumbar disc "
-            "labels 201..205."
+            "labels 201..225."
         )
 
 
