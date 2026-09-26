@@ -2,8 +2,8 @@
 API server tests.
 
 No trained checkpoint is required: without one the health endpoint reports
-the missing model and /api/analyze returns a clear 422 so the frontend can
-degrade gracefully.
+the missing model and /api/analyze returns a clear 503 so the frontend can
+degrade gracefully.  The demo path only runs when mock_vision=true.
 """
 
 import base64
@@ -11,6 +11,7 @@ import base64
 from fastapi.testclient import TestClient
 from PIL import Image
 
+import api_server
 from api_server import app, evidence_to_inputs, _png_data_url
 from schemas import EvidenceCard, LevelFinding
 
@@ -26,16 +27,36 @@ def test_health_reports_status_ok():
     assert isinstance(body["gemini_configured"], bool)
 
 
-def test_analyze_without_checkpoint_returns_422_when_mock_disabled():
+def test_root_reports_service_metadata():
+    r = client.get("/")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["service"] == "Spine MRI Decision Support API"
+    assert "version" in body
+    assert "/api/analyze" in body["endpoints"]
+    assert "registry" in body
+
+
+def test_analyze_without_checkpoint_returns_503_when_mock_disabled():
     r = client.post(
         "/api/analyze",
         files={"file": ("scan.png", _png_bytes(), "image/png")},
         data={"use_llm": "true", "mock_vision": "false"},
     )
-    assert r.status_code == 422
+    assert r.status_code == 503
     body = r.json()
     assert "detail" in body
     assert body.get("model_status") is not None
+
+
+def test_analyze_without_checkpoint_never_falls_back_to_mock_by_default():
+    r = client.post(
+        "/api/analyze",
+        files={"file": ("scan.png", _png_bytes(), "image/png")},
+        data={"use_llm": "false", "mock_vision": ""},
+    )
+    assert r.status_code == 503
+    assert r.json()["model_status"]["loaded"] is False
 
 
 def test_analyze_bad_image_returns_400():
@@ -46,7 +67,7 @@ def test_analyze_bad_image_returns_400():
     assert r.status_code == 400
 
 
-def test_evidence_to_inputs_mapping():
+def test_evidence_to_inputs_mapping_includes_model_version():
     card = EvidenceCard(
         image_processed=True,
         landmark_points=[[0.5, 0.4] for _ in range(10)],
@@ -64,9 +85,10 @@ def test_evidence_to_inputs_mapping():
                          calibrated_probability=0.55),
         ],
     )
-    ddd, geo = evidence_to_inputs(card)
+    ddd, geo = evidence_to_inputs(card, model_version="20260501-120000")
     assert len(ddd) == 2
     assert ddd[0]["level"] == "L1/L2"
+    assert ddd[0]["model_version"] == "20260501-120000"
     assert geo[0]["level"] == "L1/L2"
     # narrowed -> space_narrowed True; offset_flag -> listhesis_possible
     assert geo[1]["space_narrowed"] is True
@@ -81,8 +103,8 @@ def test_png_data_url_shape():
     assert raw[:8] == b"\x89PNG\r\n\x1a\n"
 
 
-def test_mock_vision_end_to_end():
-    """Without a checkpoint the demo path still returns a full result."""
+def test_mock_vision_explicit_end_to_end():
+    """The demo path runs only when mock_vision=true is passed explicitly."""
     r = client.post(
         "/api/analyze",
         files={"file": ("scan.png", _png_bytes(), "image/png")},
@@ -100,6 +122,27 @@ def test_mock_vision_end_to_end():
     assert body["annotated_image_data_url"].startswith("data:image/png;base64,")
     assert body["evidence"]["image_processed"] is True
     assert body["case"]["overall_status"] == "NEEDS_REVIEW"
+
+
+def test_api_key_is_enforced_when_configured(monkeypatch):
+    monkeypatch.setattr(api_server, "API_KEYS", ["s3cret-key"])
+    try:
+        r = client.post(
+            "/api/analyze",
+            files={"file": ("scan.png", _png_bytes(), "image/png")},
+            data={"mock_vision": "true"},
+        )
+        assert r.status_code == 401
+
+        r = client.post(
+            "/api/analyze",
+            headers={"X-Api-Key": "s3cret-key"},
+            files={"file": ("scan.png", _png_bytes(), "image/png")},
+            data={"mock_vision": "true"},
+        )
+        assert r.status_code == 200
+    finally:
+        monkeypatch.setattr(api_server, "API_KEYS", [])
 
 
 def _png_bytes() -> bytes:

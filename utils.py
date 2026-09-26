@@ -19,10 +19,10 @@ import torch
 from PIL import Image, ImageDraw, ImageFont
 from torchvision import transforms
 
+import config as _cfg
 from config import (
     BEST_MODEL,
     DDD_LABELS_CSV,
-    IMAGE_SIZE,
     LISTHESIS_OFFSET_THRESHOLD,
     NARROWED_DISC_THRESHOLD,
     NUM_KEYPOINTS,
@@ -61,10 +61,15 @@ GROUND_TRUTH_COLOUR = (60, 255, 60)
 # ---------------------------------------------------------
 
 def get_transform() -> transforms.Compose:
-    """Return the exact transform used during training."""
+    """Return the exact transform used during training.
+
+    `IMAGE_SIZE` is read through the config module (not a bound import) so
+    a loaded checkpoint can override it with its own training-time size.
+    """
+    size = _cfg.IMAGE_SIZE
     return transforms.Compose(
         [
-            transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
+            transforms.Resize((size, size)),
             transforms.ToTensor(),
         ]
     )
@@ -100,9 +105,17 @@ def load_model(
     """
     Load the Spine Foundation Model from a training checkpoint.
 
+    Every checkpoint saved after ``train.py`` carries a ``meta`` block with
+    the exact training hyper-parameters that affect the network shape and
+    the input preprocessing (``image_size``, ``disc_feature_stage``,
+    ``model_name``, ...).  These override the `config` module for the rest
+    of the process, so the same binary can serve checkpoints that were
+    trained at different image sizes / feature stages WITHOUT an env change
+    a restart.  Old checkpoints without ``meta`` fall back to config.py.
+
     Returns
     -------
-    (model, device, checkpoint_path)
+    (model, device, checkpoint_path, meta)
     """
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -119,11 +132,17 @@ def load_model(
             f" — train first with: python train.py"
         )
 
-    model = SpineFoundationModel().to(device)
-    model.eval()
-
     checkpoint = torch.load(checkpoint_path, map_location=device,
                             weights_only=False)
+
+    meta = _apply_checkpoint_meta(checkpoint.get("meta") or {})
+
+    # Weights come from the checkpoint; no need to fetch ImageNet weights.
+    if meta:
+        _cfg.PRETRAINED = False
+
+    model = SpineFoundationModel().to(device)
+    model.eval()
 
     state_dict = checkpoint.get("model_state_dict", checkpoint)
 
@@ -133,7 +152,37 @@ def load_model(
 
     model.load_state_dict(state_dict)
 
-    return model, device, checkpoint_path
+    return model, device, checkpoint_path, meta
+
+
+def _apply_checkpoint_meta(meta: dict) -> dict:
+    """
+    Apply per-checkpoint settings (image size, feature stage) to the config
+    module so model construction + preprocessing match the checkpoint.
+
+    Returns the sanitized meta dict (all scalar keys coerced to primitives)
+    for the caller to expose as the model version / status.
+    """
+    out: dict = {}
+    for key in ("image_size", "disc_feature_stage", "num_keypoints",
+                "num_discs", "num_pfrrmann_classes", "model_name"):
+        if key in meta and meta[key] is not None:
+            out[key] = meta[key]
+
+    if "image_size" in out:
+        _cfg.IMAGE_SIZE = int(out["image_size"])
+    if "disc_feature_stage" in out:
+        _cfg.DISC_FEATURE_STAGE = int(out["disc_feature_stage"])
+    if "model_name" in out:
+        _cfg.MODEL_NAME = str(out["model_name"])
+
+    scalar = {}
+    for key, value in meta.items():
+        if isinstance(value, (str, int, float, bool)) or value is None:
+            scalar[key] = value
+    out["created_at"] = scalar.get("created_at", "")
+    out["version"] = scalar.get("version", "")
+    return out
 
 
 # ---------------------------------------------------------

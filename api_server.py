@@ -3,32 +3,49 @@ api_server.py
 =============
 
 FastAPI REST wrapper around the deterministic decision-support pipeline.
-Serves the spine analysis to a frontend.
+Serves the spine analysis to a frontend over a live public URL (Hugging
+Face Spaces / Render / any uvicorn host).
 
 Endpoints
 ---------
-GET  /api/health
-     -> {status, vision: {loaded, checkpoint, error}, gemini_configured}
+GET  /                  service metadata + docs pointer
+GET  /api/health        {status, vision, registry, gemini_configured}
+POST /api/analyze       (multipart/form-data) -> AnalyzeResponse
 
-POST /api/analyze          (multipart/form-data)
-     file                   spine image (PNG/JPG)
-     use_llm      str       "true"/"false"  (report generation via LLM)
-     provider     str       e.g. "gemini"   (LLM provider; "" = default)
-     case_id      str       optional case identifier
-     clinical     str       JSON  {age, sex, pain_score, pain_duration_years,
-                                   symptoms: {...}, image_quality: {...}}
-     spondy_predictions str JSON list of spondylolisthesis slips
-     -> DecisionSupportResult JSON incl. an `annotated_image_data_url`
-        (thin-line anatomy overlay) for direct frontend display.
+Model registry / retraining
+----------------------------
+The checkpoint is resolved with `weights.resolve_checkpoint()`:
+  VISION_CHECKPOINT = local path or HF Hub model id  (highest priority)
+  MODEL_ID          = HF Hub model id                (fallback)
+  checkpoints/best_model.pth / release_model.pth     (local fallback)
+Every checkpoint carries a `meta` block (image_size, feature stage,
+version) written by train.py; `utils.load_model` decodes it so a
+retrained model works with zero host-side configuration.  Publish new
+weights with `python publish_model.py` and restart the service.
 
-The vision engine loads lazily from `checkpoints/best_model.pth`. Without a
-checkpoint the API stays up: /api/health reports the missing model and
-/api/analyze returns a clear 422 (so a frontend can degrade gracefully).
+Behaviour without weights (production-safety)
+----------------------------------------------
+`/api/analyze` NEVER silently invents results.  Without an engine it
+returns HTTP 503 + `model_status`.  The clearly-labelled demo path only
+runs when callers explicitly pass `mock_vision=true` (or when
+ALLOW_MOCK_FALLBACK=true is set AND no model is available).
+
+Environment
+-----------
+PORT                    uvicorn port (default 8000)
+VISION_CHECKPOINT       local path or HF Hub model id for the imaging model
+MODEL_ID                HF Hub model id (fallback to VISION_CHECKPOINT)
+HF_HUB_REVISION         pinned HF Hub revision (optional)
+HF_TOKEN                secret for private model repos
+HF_MODEL_FILENAME       file to download from the repo (default best_model.pth)
+GEMINI_API_KEY          optional LLM report provider
+API_KEYS                comma-separated keys. When set, requests must send
+                        `Authorization: Bearer <key>` or `X-Api-Key: <key>`.
+CORS_ORIGINS            comma-separated allowed origins (default *).
+ALLOW_MOCK_FALLBACK     "true" enables the demo path when no model is loaded.
 
 Run locally:
     uvicorn api_server:app --host 0.0.0.0 --port 8000
-Run on Colab (see colab_api_run.ipynb): start in a notebook thread and
-expose via an ngrok tunnel / cloudflared URL.
 """
 
 from __future__ import annotations
@@ -39,43 +56,97 @@ import json
 import logging
 import os
 import threading
-from pathlib import Path
+from contextlib import asynccontextmanager
 from typing import Optional
 
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from PIL import Image
 
+import weights
 from decision_support import run_decision_support
+from evidence_schemas import DecisionSupportResult
 import vision_engine
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("spine-api")
 
-app = FastAPI(title="Spine MRI Decision Support API", version="1.1.0")
+APP_VERSION = "2.0.0"
 
-# Frontend-friendly: allow any origin in dev (tighten in production).
+
+# ------------------------------------------------------------------
+# Settings from the environment (read once at import for the test path;
+# real deployments set these on the host).
+# ------------------------------------------------------------------
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    return os.environ.get(name, "true" if default else "false").strip().lower() == "true"
+
+
+ALLOW_MOCK_FALLBACK = _env_flag("ALLOW_MOCK_FALLBACK", default=False)
+CORS_ORIGINS = [o.strip() for o in
+                os.environ.get("CORS_ORIGINS", "*").split(",") if o.strip()]
+API_KEYS = [k.strip() for k in os.environ.get("API_KEYS", "").split(",")
+            if k.strip()]
+
+
+app = FastAPI(
+    title="Spine MRI Decision Support API",
+    description="Lumbar-spine MRI analysis: landmark localization, per-level "
+                "Pfirrmann grading, geometry, and a validated decision-support "
+                "report. Frontend-ready (multipart image upload) and "
+                "model-registry aware.",
+    version=APP_VERSION,
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
+    allow_origins=CORS_ORIGINS,
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
+    allow_credentials=False,
 )
 
 _ENGINE: Optional[vision_engine.VisionEngine] = None
 _ENGINE_LOCK = threading.Lock()
 
 
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    """Warm the vision engine at startup (non-fatal on failure)."""
+    logger.info("Spine API %s starting. registry=%s",
+                APP_VERSION, weights.cache_config_summary())
+    try:
+        engine = _get_engine()
+        logger.info("Vision engine loaded: %s", engine.status())
+    except Exception as exc:  # noqa: BLE001 - startup must not crash without weights
+        logger.warning("Vision engine failed to load (serving without model): %s", exc)
+    yield
+
+
+app.router.lifespan_context = lifespan
+
+
 def _get_engine() -> vision_engine.VisionEngine:
-    """Lazily build the vision engine exactly once (thread-safe)."""
     global _ENGINE
     if _ENGINE is not None:
         return _ENGINE
     with _ENGINE_LOCK:
         if _ENGINE is None:
-            _ENGINE = vision_engine.VisionEngine()
+            try:
+                _ENGINE = vision_engine.VisionEngine()
+            except weights.ModelResolutionError as exc:
+                logger.warning("No vision model: %s", exc)
+                _ENGINE = vision_engine.VisionEngine.__new__(vision_engine.VisionEngine)
+                _ENGINE._loaded = False
+                _ENGINE._checkpoint_name = None
+                _ENGINE._checkpoint_meta = {}
+                _ENGINE._model = None
+                _ENGINE._device = None
+                _ENGINE.error = str(exc)
     return _ENGINE
 
 
@@ -91,10 +162,37 @@ def _gemini_configured() -> bool:
 
 
 # ------------------------------------------------------------------
+# Optional API-key gate (API_KEYS env). Frontends send the key in the
+# Authorization: Bearer header or X-Api-Key.
+# ------------------------------------------------------------------
+
+def _authorize(api_key: Optional[str] = Header(None, alias="X-Api-Key"),
+               authorization: Optional[str] = Header(None)):
+    if not API_KEYS:
+        return True
+    supplied = api_key or ""
+    if not supplied and authorization:
+        if authorization.lower().startswith("bearer "):
+            supplied = authorization[7:].strip()
+    return bool(supplied) and supplied in API_KEYS
+
+
+def _require_api_key(api_key: Optional[str] = Header(None, alias="X-Api-Key"),
+                     authorization: Optional[str] = Header(None)):
+    if _authorize(api_key, authorization):
+        return None
+    return JSONResponse(
+        status_code=401,
+        content={"detail": "Unauthorized. Send a valid API key via the "
+                           "X-Api-Key header or Authorization: Bearer <key>."},
+    )
+
+
+# ------------------------------------------------------------------
 # EvidenceCard -> decision-support raw inputs
 # ------------------------------------------------------------------
 
-def evidence_to_inputs(card) -> tuple[list, list]:
+def evidence_to_inputs(card, model_version: str = "") -> tuple[list, list]:
     """Map an EvidenceCard to decision-support `ddd_predictions`/`geometry`."""
     ddd_predictions = []
     for lf in card.ddd:
@@ -108,7 +206,7 @@ def evidence_to_inputs(card) -> tuple[list, list]:
                 float(lf.calibrated_probability)
                 if lf.calibrated_probability is not None else None
             ),
-            "model_version": "vision-engine-v1",
+            "model_version": model_version,
         })
 
     geometry = []
@@ -133,7 +231,7 @@ def _png_data_url(image: Image.Image) -> str:
 
 
 # ------------------------------------------------------------------
-# Mock vision (demo path — usable before a checkpoint is trained)
+# Mock vision (explicit demo path — never used implicitly in production)
 # ------------------------------------------------------------------
 
 def mock_evidence_and_draw(image: Image.Image,
@@ -142,7 +240,7 @@ def mock_evidence_and_draw(image: Image.Image,
     Deterministic, clearly-labelled DEMO detections: finds the brightest
     vertical spine column and lays the 10 keypoints along it. Used so the
     whole API (~ thin-line overlay -> evidence -> decision support -> report)
-    can be exercised on Colab before `checkpoints/best_model.pth` exists.
+    can be exercised without a checkpoint.
     Never to be mistaken for real model output.
     """
     import numpy as np
@@ -200,8 +298,7 @@ def mock_evidence_and_draw(image: Image.Image,
         landmark_conf=list(conf),
         geometric_indicators=geo,
         ddd=ddd,
-        notes=["MOCK VISION DEMO: synthetic detections until "
-               "checkpoints/best_model.pth is trained."],
+        notes=["MOCK VISION DEMO: synthetic detections."],
     )
     annotated = draw_landmarks(
         image, coords=points, confidence=conf)
@@ -212,18 +309,45 @@ def mock_evidence_and_draw(image: Image.Image,
 # Routes
 # ------------------------------------------------------------------
 
+class AnalyzeResponse(DecisionSupportResult):
+    """Full /api/analyze payload (decision-support result + evidence + overlay)."""
+    evidence: dict = Field(default_factory=dict)
+    annotated_image_data_url: str = ""
+    model_status: dict = Field(default_factory=dict)
+    mock_vision: bool = False
+
+
+@app.get("/")
+def root():
+    engine = _get_engine()
+    return {
+        "service": "Spine MRI Decision Support API",
+        "version": APP_VERSION,
+        "docs": "/docs",
+        "openapi": "/openapi.json",
+        "endpoints": ["/api/health", "/api/analyze"],
+        "vision": engine.status(),
+        "registry": weights.cache_config_summary(),
+        "gemini_configured": _gemini_configured(),
+    }
+
+
 @app.get("/api/health")
 def health():
     engine = _get_engine()
     return {
         "status": "ok",
+        "version": APP_VERSION,
         "vision": engine.status(),
+        "registry": weights.cache_config_summary(),
+        "mock_fallback_allowed": ALLOW_MOCK_FALLBACK,
         "gemini_configured": _gemini_configured(),
     }
 
 
-@app.post("/api/analyze")
+@app.post("/api/analyze", response_model=AnalyzeResponse)
 async def analyze(
+    auth_success: dict = Depends(_require_api_key),
     file: UploadFile = File(...),
     use_llm: str = Form("true"),
     provider: str = Form(""),
@@ -232,10 +356,14 @@ async def analyze(
     spondy_predictions: str = Form("[]"),
     mock_vision: str = Form(""),
 ):
+    if isinstance(auth_success, JSONResponse):
+        return auth_success
+
     engine = _get_engine()
-    mock_mode = (mock_vision.strip().lower() == "true") or (
-        mock_vision.strip() == "" and not engine.available
-    )
+    mock_flag = mock_vision.strip().lower() == "true"
+    mock_fallback = mock_flag or (mock_vision.strip() == ""
+                                  and ALLOW_MOCK_FALLBACK and not engine.available)
+    mock_mode = mock_flag if engine.available else mock_fallback
 
     try:
         image = Image.open(io.BytesIO(await file.read())).convert("RGB")
@@ -246,16 +374,18 @@ async def analyze(
         card, annotated = mock_evidence_and_draw(image, file.filename or "")
     elif not engine.available:
         return JSONResponse(
-            status_code=422,
+            status_code=503,
             content={
-                "detail": "Vision model is not loaded. Train or upload "
-                          "checkpoints/best_model.pth (see colab_training.ipynb), "
-                          "or call again with mock_vision=true for the demo path.",
+                "detail": "Vision model is not loaded. Configure the model "
+                          "registry (MODEL_ID / VISION_CHECKPOINT) or upload "
+                          "checkpoints/best_model.pth. For a clearly-labelled "
+                          "demo only, call with mock_vision=true.",
                 "model_status": engine.status(),
+                "registry": weights.cache_config_summary(),
             },
         )
     else:
-        # Vision inference (single forward pass on the CPU threadpool).
+        # Vision inference (single forward pass on the threadpool).
         card, annotated = await run_in_threadpool(
             engine.analyze_and_draw, image, file.filename or "")
 
@@ -272,7 +402,7 @@ async def analyze(
     image_quality = clinical_ctx.pop("image_quality", None)
     image_name = file.filename or ""
 
-    ddd_predictions, geometry = evidence_to_inputs(card)
+    ddd_predictions, geometry = evidence_to_inputs(card, engine.model_version)
 
     result = run_decision_support(
         case_id=case_id or image_name or "api-case",

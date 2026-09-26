@@ -1,13 +1,15 @@
 # Agentic Spine AI Pipeline - dependencies
 #
+# One file for the whole repo: training, data prep AND the hosted REST API.
+# Deploy a CPU build on HF Spaces / Render with the provided Dockerfile
+# (it pre-installs the CPU torch wheels so the big CUDA wheel is skipped).
+#
 # Install CPU build on machines without CUDA:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 # or the CUDA build for Colab/GPU training (see https://pytorch.org).
 #
 # LLM agents: a Google Gemini free API key (get one at aistudio.google.com/apikey)
-# is set via the GEMINI_API_KEY environment variable. The LLM client uses only
-# the Python standard library, so no extra package is required. For a fully
-# local option set LLM_PROVIDER=ollama and run a local Ollama server.
+# is set via the GEMINI_API_KEY environment variable.
 # For Colab training of the vision-engine imaging model also add:
 #   pip install google-colab openpyxl jupyter
 
@@ -23,15 +25,30 @@ Pillow
 scikit-learn
 tqdm
 
-# MRI volume parsing (prepare_spider.py needs this to read the .mha files;
-# without it every SPIDER case is skipped and the landmark CSVs come out empty)
+# MRI volume parsing (prepare_spider.py needs this to read the .mha files)
 SimpleITK
 
 # Structured agent outputs
 pydantic
+
+# Config layer (pipeline_config.py -> config.yaml)
+PyYAML
 
 # Visualization
 matplotlib
 
 # Local UI
 gradio
+
+# --- Hosted REST API (api_server.py) ------------------------------
+# fastapi + uvicorn serve the API; python-multipart decodes the image upload;
+# httpx is used by the TestClient smoke tests.
+fastapi
+uvicorn
+python-multipart
+httpx
+
+# Model registry: download the active checkpoint from the Hugging Face Hub
+# (see weights.py). requests is used by data-prep downloaders + hub uploads.
+huggingface_hub
+requests

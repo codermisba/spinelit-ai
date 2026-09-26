@@ -34,13 +34,7 @@ import torch
 import torch.nn as nn
 import timm
 
-from config import (
-    DISC_FEATURE_STAGE,
-    NUM_DISCS,
-    NUM_KEYPOINTS,
-    NUM_PFRRMANN_CLASSES,
-    PRETRAINED,
-)
+import config as _cfg
 
 
 class _DiscLocalizedHead(nn.Module):
@@ -61,7 +55,7 @@ class _DiscLocalizedHead(nn.Module):
             nn.Dropout(0.25),
             nn.Linear(feature_dim, 256),
             nn.GELU(),
-            nn.Linear(256, NUM_PFRRMANN_CLASSES),
+            nn.Linear(256, _cfg.NUM_PFRRMANN_CLASSES),
         )
 
     def forward(self, fmap: torch.Tensor, disc_centers: torch.Tensor):
@@ -84,13 +78,21 @@ class SpineFoundationModel(nn.Module):
     def __init__(self):
         super().__init__()
 
+        # Config values are read at __init__ time (not import time) so that
+        # `utils.load_model` can apply per-checkpoint metadata (image size,
+        # feature stage, ...) before constructing the network.  Training
+        # always uses the module-level defaults from config.py.
+        disc_feature_stage = _cfg.DISC_FEATURE_STAGE
+        num_keypoints = _cfg.NUM_KEYPOINTS
+        num_discs = _cfg.NUM_DISCS
+
         # Spatial feature backbone (keeps a mid-stage feature map for
         # disc-localized pooling). Stage index + global average pooling.
         self.backbone = timm.create_model(
             "convnext_tiny",
-            pretrained=PRETRAINED,
+            pretrained=_cfg.PRETRAINED,
             features_only=True,
-            out_indices=(DISC_FEATURE_STAGE,),
+            out_indices=(disc_feature_stage,),
         )
         # Infer the spatial-channel dim of the selected stage.
         with torch.no_grad():
@@ -110,14 +112,14 @@ class SpineFoundationModel(nn.Module):
             nn.Dropout(0.25),
             nn.Linear(512, 256),
             nn.GELU(),
-            nn.Linear(256, 20),
+            nn.Linear(256, num_keypoints * 2),
         )
 
         self.localization_confidence_head = nn.Sequential(
             nn.Dropout(0.25),
             nn.Linear(512, 128),
             nn.GELU(),
-            nn.Linear(128, NUM_KEYPOINTS),
+            nn.Linear(128, num_keypoints),
         )
 
         self.disc_head = _DiscLocalizedHead(feature_dim)
@@ -134,7 +136,7 @@ class SpineFoundationModel(nn.Module):
         )
 
         # Disc centres = coords[10:20] (after 5 vertebra points), (x, y).
-        disc_centers = coords[:, 10:20].view(-1, NUM_DISCS, 2)
+        disc_centers = coords[:, 10:20].view(-1, _cfg.NUM_DISCS, 2)
         ddd_logits = self.disc_head(fmap, disc_centers)
 
         return {

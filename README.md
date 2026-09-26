@@ -139,6 +139,31 @@ Without a checkpoint the pipeline still runs in a **degraded mode**: it shows
 the LLM reasoning/report skeleton and clear model-status, but vision tables
 stay empty until the model is trained.
 
+## Hosted API (live link)
+
+The vision engine + decision-support layer are exposed as a REST API that you
+can host on **Hugging Face Spaces** or **Render** and call straight from any
+frontend over HTTPS:
+
+- `GET  /` and `GET /api/health` — service metadata, model status/version
+- `POST /api/analyze` — multipart `file` upload → annotated overlay
+  (data-URL PNG), per-level DDD table, report, model version
+
+```bash
+uvicorn api_server:app --host 0.0.0.0 --port 7860   # locally
+```
+
+Retraining keeps working without code changes: weights are versioned on the
+HF Hub (`weights.py` registry), and each checkpoint carries its own metadata
+(`image_size`, `disc_feature_stage`, `version`) that is applied at load time.
+
+- Deploy guide → [`docs/DEPLOY_API.md`](docs/DEPLOY_API.md)
+- Ready-to-use frontend page → [`examples/frontend_demo.html`](examples/frontend_demo.html)
+- Publish retrained weights → `python publish_model.py --repo you/spine-severity --with-calibration`
+
+Forwards-safe: `/api/analyze` returns `503` (never fake results) when no model
+is configured, unless the caller explicitly passes `mock_vision=true`.
+
 ---
 
 ## Run the pipeline

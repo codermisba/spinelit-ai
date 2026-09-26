@@ -49,7 +49,12 @@ OUTPUT_DIR = ROOT_DIR / "outputs"
 LOG_DIR = ROOT_DIR / "logs"
 
 for _d in (CHECKPOINT_DIR, OUTPUT_DIR, LOG_DIR):
-    _d.mkdir(exist_ok=True)
+    try:
+        _d.mkdir(exist_ok=True, parents=True)
+    except OSError:
+        # Read-only / restricted hosts (e.g. some container images) must not
+        # crash at import time; callers handle missing dirs gracefully.
+        pass
 
 
 # Annotation / label files (all optional except the disc landmark CSV)

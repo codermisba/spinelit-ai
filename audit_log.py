@@ -67,11 +67,14 @@ class AuditLogger:
         model_versions: Optional[dict[str, str]] = None,
         summary: Optional[dict[str, Any]] = None,
     ) -> str:
-        """Write one audit record. Returns run_id."""
+        """Write one audit record. Returns run_id.
+
+        Logging is best-effort: a read-only disk must never break the API,
+        so failures are swallowed (the calling pipeline already returned a
+        result).
+        """
         if not self._enabled:
             return run_id
-
-        self._log_dir.mkdir(parents=True, exist_ok=True)
 
         record = {
             "run_id": run_id,
@@ -84,8 +87,13 @@ class AuditLogger:
         }
         record = self._sanitize(record)
 
-        with open(self._file(), "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(record) + "\n")
+        try:
+            self._log_dir.mkdir(parents=True, exist_ok=True)
+            with open(self._file(), "a", encoding="utf-8") as fh:
+                fh.write(json.dumps(record) + "\n")
+        except OSError:
+            # Read-only host or ephemeral disk: skip logging without failing.
+            pass
         return run_id
 
 

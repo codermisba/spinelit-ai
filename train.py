@@ -46,9 +46,12 @@ from config import (
     CPU_NUM_THREADS,
     DDD_LOSS_WEIGHT,
     DDD_LABEL_SMOOTHING,
+    DISC_FEATURE_STAGE,
     EARLY_STOPPING_PATIENCE,
     GRAD_CLIP_NORM,
+    IMAGE_SIZE,
     LEARNING_RATE,
+    MODEL_NAME,
     NUM_DISCS,
     NUM_EPOCHS,
     NUM_KEYPOINTS,
@@ -386,6 +389,19 @@ class Trainer:
             },
             "tasks": {
                 "ddd": self.train_ddd,
+            },
+            # Runtime contract consumed by the API / model registry: lets the
+            # deployed service load a retrained checkpoint correctly without a
+            # config edit / restart (see utils.load_model).
+            "meta": {
+                "version": datetime.now().strftime("%Y%m%d-%H%M%S"),
+                "created_at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                "image_size": IMAGE_SIZE,
+                "disc_feature_stage": DISC_FEATURE_STAGE,
+                "model_name": MODEL_NAME,
+                "num_keypoints": NUM_KEYPOINTS,
+                "num_discs": NUM_DISCS,
+                "num_pfrrmann_classes": NUM_PFRRMANN_CLASSES,
             },
             "model_state_dict": self.model.state_dict(),
             "optimizer_state_dict": self.optimizer.state_dict(),

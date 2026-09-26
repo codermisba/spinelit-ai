@@ -74,7 +74,7 @@ def main() -> None:
                     help="path to model checkpoint (default best_model.pth)")
     args = ap.parse_args()
 
-    model, device, ckpt = load_model(args.checkpoint or "checkpoints/best_model.pth")
+    model, device, ckpt, _ = load_model(args.checkpoint or "checkpoints/best_model.pth")
     model.eval()
     print(f"Loaded : {ckpt}")
 

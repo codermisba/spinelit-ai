@@ -49,6 +49,9 @@ def main() -> None:
             key: value.half().clone() for key, value in state_dict.items()
         },
         "tasks": checkpoint.get("tasks", {}),
+        # Keep training-time metadata so the API can load this artifact with
+        # the right image size / architecture (see utils.load_model).
+        "meta": checkpoint.get("meta", {}),
     }
 
     output = Path(args.output)

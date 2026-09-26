@@ -145,7 +145,7 @@ def extract_image_features(records_csv: Path) -> dict:
     filenames = [str(f) for f in df["filename"].dropna().unique()]
 
     try:
-        model, device, _ = load_model(BEST_MODEL)
+        model, device, _, _ = load_model(BEST_MODEL)
     except FileNotFoundError:
         print("No image checkpoint found -> training clinical-only model.")
         return {}

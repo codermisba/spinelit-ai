@@ -25,7 +25,7 @@ import numpy as np
 import torch
 from PIL import Image
 
-from config import BEST_MODEL, RELEASE_MODEL
+import weights
 from schemas import EvidenceCard, build_evidence_card
 from utils import (
     compute_geometric_indicators,
@@ -40,22 +40,26 @@ from utils import (
 class VisionEngine:
     """Runs the imaging model and assembles an EvidenceCard."""
 
-    def __init__(self, checkpoint: Optional[str] = None):
+    def __init__(self, checkpoint: Optional[str | Path] = None):
         self._loaded = False
         self._model = None
         self._device = None
         self._checkpoint_name = None
+        self._checkpoint_meta: dict = {}
         self.error = ""
-        self.load(checkpoint or str(BEST_MODEL))
+        self.load(checkpoint)
 
-    def load(self, checkpoint: str):
+    def load(self, checkpoint: Optional[str | Path] = None):
+        checkpoint_path = checkpoint or weights.resolve_checkpoint()
         try:
-            self._model, self._device, self._checkpoint_name = load_model(
-                checkpoint
-            )
+            model, device, name, meta = load_model(str(checkpoint_path))
+            self._model = model
+            self._device = device
+            self._checkpoint_name = name
+            self._checkpoint_meta = meta or {}
             self._loaded = True
             self.error = ""
-        except FileNotFoundError as exc:
+        except (FileNotFoundError, weights.ModelResolutionError) as exc:
             self._loaded = False
             self.error = str(exc)
 
@@ -67,9 +71,26 @@ class VisionEngine:
     def checkpoint_name(self) -> str:
         return str(self._checkpoint_name) if self._checkpoint_name else "none"
 
+    @property
+    def checkpoint_meta(self) -> dict:
+        return dict(self._checkpoint_meta)
+
+    @property
+    def model_version(self) -> str:
+        """Checkpoint version string ('' when the checkpoint has no meta)."""
+        v = self._checkpoint_meta.get("version", "")
+        if v:
+            return str(v)
+        return str(self._checkpoint_name) if self._checkpoint_name else ""
+
     def status(self) -> dict:
-        return {"loaded": self.available, "checkpoint": self.checkpoint_name,
-                "error": self.error}
+        return {
+            "loaded": self.available,
+            "checkpoint": self.checkpoint_name,
+            "model_version": self.model_version,
+            "image_size": _image_size_from_meta(self._checkpoint_meta),
+            "error": self.error,
+        }
 
     @torch.no_grad()
     def _run_model(self, image: Image.Image) -> dict:
@@ -150,6 +171,14 @@ def run_vision(image: Image.Image, image_name: str = "",
                engine: Optional[VisionEngine] = None) -> EvidenceCard:
     engine = engine or VisionEngine()
     return engine.analyze(image, image_name)
+
+
+def _image_size_from_meta(meta: dict):
+    """Best-effort checkpoint image size for status reporting."""
+    import config as _cfg
+    if meta.get("image_size"):
+        return int(meta["image_size"])
+    return _cfg.IMAGE_SIZE
 
 
 if __name__ == "__main__":

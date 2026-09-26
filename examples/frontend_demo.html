@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SpineLIT API demo</title>
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, sans-serif; margin: 0; background: #0f1420; color: #e8edf7; }
+  main { max-width: 900px; margin: 0 auto; padding: 24px; }
+  h1 { font-size: 22px; }
+  .card { background: #171e30; border: 1px solid #2a3550; border-radius: 12px; padding: 16px; margin: 16px 0; }
+  label { display: block; font-weight: 600; margin: 8px 0 4px; }
+  input[type=file] { width: 100%; }
+  input[type=file]::file-selector-button { background: #3754d8; color: white; border: 0; padding: 8px 12px; border-radius: 8px; cursor: pointer; }
+  button { background: #3754d8; color: #fff; border: 0; padding: 10px 18px; border-radius: 8px; font-weight: 600; cursor: pointer; margin-top: 10px; }
+  button:disabled { opacity: .5; cursor: wait; }
+  pre { background: #0b0f1a; border: 1px solid #2a3550; border-radius: 8px; padding: 12px; overflow: auto; font-size: 12px; }
+  img { max-width: 100%; border-radius: 8px; border: 1px solid #2a3550; }
+  .status { font-size: 13px; color: #9fb0d8; margin-top: 8px; min-height: 18px; word-break: break-word; }
+  .meter { width: 100%; height: 8px; background: #242c44; border-radius: 4px; overflow: hidden; margin: 4px 0 12px; }
+  .meter span { display: block; height: 100%; background: #4f7cff; }
+  table { border-collapse: collapse; width: 100%; font-size: 13px; }
+  td, th { border: 1px solid #2a3550; padding: 6px 8px; text-align: left; }
+  .warn { color: #ffd166; }
+</style>
+</head>
+<body>
+<main>
+  <h1>SpineLIT — MRI analysis API demo</h1>
+  <div class="card">
+    <label>API base URL</label>
+    <input id="base" type="url" value="https://YOUR-HOST.REPLACE-ME">
+    <label>API key (optional)</label>
+    <input id="key" type="password" placeholder="X-Api-Key">
+    <label>Sagittal lumbar MRI image</label>
+    <input id="file" type="file" accept="image/*">
+    <label>Age (for the clinical context)</label>
+    <input id="age" type="number" value="52">
+    <button id="run">Analyze</button>
+    <div id="status" class="status"></div>
+  </div>
+
+  <div class="card">
+    <b>Annotated overlay</b>
+    <div id="overlaywrap"><img id="overlay" alt=""></div>
+    <div id="modelinfo" class="status"></div>
+  </div>
+
+  <div class="card">
+    <b>Per-level findings</b>
+    <table id="findings">
+      <thead><tr><th>Level</th><th>Grade</th><th>Confidence</th><th>Severity</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <b>Report</b>
+    <pre id="report"></pre>
+  </div>
+</main>
+
+<script>
+  const $ = id => document.getElementById(id);
+
+  async function run() {
+    const file = $("file").files[0];
+    if (!file) { $("status").textContent = "Choose an image first."; return; }
+    const base = $("base").value.trim();
+    const key = $("key").value.trim();
+
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("use_llm", "false");
+    fd.append("clinical", JSON.stringify({ age: Number($("age").value) || null }));
+
+    $("run").disabled = true;
+    $("status").textContent = "Analyzing... this can take a few seconds.";
+    try {
+      const headers = key ? { "X-Api-Key": key } : {};
+      const res = await fetch(base.replace(/\/+$/, "") + "/api/analyze",
+                              { method: "POST", headers, body: fd });
+      const data = await res.json();
+      $("status").textContent = "HTTP " + res.status;
+      if (!res.ok) {
+        $("status").textContent += " — " + (data.detail || JSON.stringify(data));
+        return;
+      }
+      $("modelinfo").innerHTML =
+        `model <b>${data.model_status.model_version || "?"}</b> ` +
+        `· image ${data.model_status.image_size || "?"}px ` +
+        (data.mock_vision ? '<span class="warn"> — MOCK DEMO</span>' : "");
+
+      if (data.annotated_image_data_url) {
+        $("overlay").src = data.annotated_image_data_url;
+      }
+      const tbody = $("findings").querySelector("tbody");
+      tbody.innerHTML = "";
+      for (const f of data.evidence.ddd) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td>${f.level}</td><td>${f.pfirrmann_label} (${f.pfirrmann_grade})</td>` +
+                       `<td>${(f.calibrated_probability || 0).toFixed(2)}</td><td>${f.severity}</td>`;
+        tbody.appendChild(tr);
+      }
+      $("report").textContent = format_report(data.report);
+
+  function format_report(r) {
+    if (!r) return "no report";
+    const lines = [];
+    if (r.overall_status) lines.push("OVERALL STATUS: " + r.overall_status);
+    if (r.impression?.length) lines.push("\nImpression:", ...r.impression.map((x, i) => `${i + 1}. ${x}`));
+    if (r.objective_imaging_findings?.length) lines.push("\nImaging findings:", ...r.objective_imaging_findings.map((x, i) => `${i + 1}. ${x}`));
+    if (r.provisional_findings?.length) lines.push("\nProvisional:", ...r.provisional_findings.map((x, i) => `${i + 1}. ${x}`));
+    if (r.recommendations?.length) lines.push("\nRecommendations:", ...r.recommendations.map((x, i) => `${i + 1}. ${x}`));
+    if (r.clinical_correlation) lines.push("\nClinical correlation: " + r.clinical_correlation);
+    if (r.confidence_limitations?.length) lines.push("\nLimitations:", ...r.confidence_limitations.map(x => "- " + x));
+    if (r.disclaimer) lines.push("\n" + r.disclaimer);
+    return lines.join("\n");
+  }
+    } catch (err) {
+      $("status").textContent = "Request failed: " + err.message;
+    } finally {
+      $("run").disabled = false;
+    }
+  }
+
+  $("run").addEventListener("click", run);
+</script>
+</body>
+</html>
