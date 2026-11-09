@@ -7,13 +7,19 @@ Evaluate the Spine Foundation Model on the validation split.
 Reports:
 - Coordinate MAE / MSE (normalized)
 - Mean + per-point localization error (px) — vertebrae and discs separate
-- Confidence statistics
-- DDD Pfirrmann accuracy and grade MAE (only when labels exist)
+- PCK@5% / PCK@10% (percentage of landmarks within 5% / 10% of image size)
+- Confidence statistics + mean heatmap peak
+- DDD Pfirrmann accuracy and grade MAE — only when the checkpoint actually
+  contains a trained DDD head and the dataset has labels
+
+The checkpoint is loaded through ``utils.load_model`` so the training-time
+image size, backbone name and normalisation are applied automatically.
 
 Usage
 -----
 python evaluate.py
 python evaluate.py --checkpoint checkpoints/last_model.pth
+python evaluate.py --max-samples 200
 """
 
 import argparse
@@ -24,21 +30,19 @@ import torch
 from sklearn.model_selection import StratifiedShuffleSplit
 from torch.utils.data import DataLoader, Subset
 
+import config as _cfg
 from config import (
     BATCH_SIZE,
     DISC_LEVELS,
-    IMAGE_SIZE,
     NUM_KEYPOINTS,
     NUM_WORKERS,
     PIN_MEMORY,
     VERTEBRAE,
 )
 from dataset import SpineDataset
-from model import SpineFoundationModel
-from utils import severity_from_grade
+from utils import load_model
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-PIXEL_SCALE = IMAGE_SIZE
 
 
 def _split_labels(dataset: SpineDataset) -> list:
@@ -72,27 +76,35 @@ def _shrink_rare_labels(labels):
 
 
 def build_val_indices(dataset: SpineDataset) -> np.ndarray:
-    """Recompute the same validation split used by train.py (falls back to
-    a random split for tiny datasets, matching train.py's behaviour)."""
+    """Recompute the *exact* validation split used by train.py.
+
+    The split must be identical, otherwise evaluate.py would report metrics
+    on images the model trained on.  Keep this in lock-step with
+    Train.prepare_dataloaders (15% validation, same seed, same stratified
+    labels, same fallback).
+    """
     labels = _split_labels(dataset)
     n_images = len(dataset.image_names)
     n_classes = len(set(labels))
-    n_val = n_images - int(n_images * 0.80)
+    n_val = max(1, int(round(0.15 * n_images)))
     if n_images >= 20 and n_val >= n_classes:
-        splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.20,
+        splitter = StratifiedShuffleSplit(n_splits=1, test_size=0.15,
                                           random_state=42)
         _, val_idx = next(splitter.split(dataset.image_names, labels))
-        return val_idx
-    rng = np.random.RandomState(42)
-    perm = rng.permutation(n_images)
-    n_val = max(1, int(round(0.20 * n_images)))
-    return perm[:n_val]
+        return np.asarray(val_idx)
+    perm = torch.randperm(
+        n_images, generator=torch.Generator().manual_seed(42)
+    ).tolist()
+    return np.asarray(perm[:n_val])
 
 
 @torch.no_grad()
-def compute_metrics(model, val_loader, max_samples=None) -> dict:
+def compute_metrics(model, val_loader, max_samples=None,
+                    pixel_scale: int | None = None,
+                    ddd_available: bool = False) -> dict:
 
-    coord_errors, confs = [], []
+    pixel_scale = int(pixel_scale or _cfg.IMAGE_SIZE)
+    coord_errors, confs, peaks = [], [], []
     ddd_acc, ddd_mae = [], []
 
     model.eval()
@@ -114,8 +126,10 @@ def compute_metrics(model, val_loader, max_samples=None) -> dict:
         )
         coord_errors.append(errors.numpy())
         confs.append(outputs["localization_conf"].float().cpu().numpy())
+        if "heatmap_peak" in outputs:
+            peaks.append(outputs["heatmap_peak"].float().cpu().numpy())
 
-        if batch["ddd_mask"].sum() > 0:
+        if ddd_available and batch["ddd_mask"].sum() > 0:
             mask = batch["ddd_mask"].bool()
             ddd_class = batch["ddd_class"].long()
             pred_class = outputs["ddd_logits"].argmax(dim=-1).cpu().long()
@@ -129,22 +143,31 @@ def compute_metrics(model, val_loader, max_samples=None) -> dict:
 
     point_errors = np.concatenate(coord_errors)      # (N, 10), NaN = masked
     confidences = np.concatenate(confs)
+    valid = ~np.isnan(point_errors)
+    finite = point_errors[valid]
 
     n_v = len(VERTEBRAE)
 
     results = {
-        "num_points": int(np.sum(~np.isnan(point_errors))),
-        "mean_loc_err_px": float(np.nanmean(point_errors) * PIXEL_SCALE),
+        "num_points": int(valid.sum()),
+        "image_size": pixel_scale,
+        "mean_loc_err_px": float(np.nanmean(point_errors) * pixel_scale),
         "vertebra_err_px": float(
-            np.nanmean(point_errors[:, :n_v]) * PIXEL_SCALE
+            np.nanmean(point_errors[:, :n_v]) * pixel_scale
         ),
         "disc_err_px": float(
-            np.nanmean(point_errors[:, n_v:]) * PIXEL_SCALE
+            np.nanmean(point_errors[:, n_v:]) * pixel_scale
         ),
-        "per_point_px": np.nanmean(point_errors, axis=0) * PIXEL_SCALE,
+        "per_point_px": np.nanmean(point_errors, axis=0) * pixel_scale,
+        "mean_loc_err_norm": float(np.nanmean(point_errors)),
+        "pck5": float((finite <= 0.05).mean()) if finite.size else None,
+        "pck10": float((finite <= 0.10).mean()) if finite.size else None,
         "conf_mean": float(confidences.mean()),
         "conf_per_point": confidences.mean(axis=0),
     }
+
+    if peaks:
+        results["heatmap_peak_mean"] = float(np.concatenate(peaks).mean())
 
     results["ddd_accuracy"] = (
         float(np.concatenate(ddd_acc).mean())
@@ -163,11 +186,16 @@ def print_summary(results: dict) -> None:
     print()
     print("## Foundation Model Evaluation")
     print()
+    print(f"Image size (checkpoint) : {results['image_size']} px")
     print(f"Visible Points Evaluated : {results['num_points']}")
     print()
     print(f"Mean Localization Error (px) : {results['mean_loc_err_px']:.2f}")
     print(f"Vertebrae Mean Error (px)    : {results['vertebra_err_px']:.2f}")
     print(f"Disc Mean Error (px)         : {results['disc_err_px']:.2f}")
+    print(f"Mean normalized error        : {results['mean_loc_err_norm']:.4f}")
+    if results["pck5"] is not None:
+        print(f"PCK@5%  (<= 5% image size)   : {results['pck5'] * 100:.2f} %")
+        print(f"PCK@10% (<= 10% image size)  : {results['pck10'] * 100:.2f} %")
     print()
 
     print("Per-Point Localization Error (px):")
@@ -179,12 +207,17 @@ def print_summary(results: dict) -> None:
 
     print()
     print(f"Mean Confidence : {results['conf_mean']:.3f}")
+    if "heatmap_peak_mean" in results:
+        print(f"Mean heatmap peak : {results['heatmap_peak_mean']:.3f}")
 
     if results["ddd_accuracy"] is not None:
         print(f"DDD Pfirrmann Accuracy : "
               f"{results['ddd_accuracy'] * 100:.2f} %")
         print(f"DDD Grade MAE          : "
               f"{results['ddd_mae_grade']:.3f} Pfirrmann grades")
+    else:
+        print("DDD Pfirrmann metrics  : unavailable "
+              "(no trained DDD head and/or no labels)")
 
     print()
 
@@ -208,6 +241,11 @@ def main() -> None:
     print(f"Using Device : {DEVICE}")
     print(f"Checkpoint   : {checkpoint_path}")
 
+    # load_model applies the checkpoint's own image size / backbone / norm.
+    model, device, _, meta = load_model(str(checkpoint_path))
+    tasks = dict(meta.get("tasks") or {})
+    image_size = int(meta.get("image_size") or _cfg.IMAGE_SIZE)
+
     dataset = SpineDataset()
     val_dataset = Subset(dataset, build_val_indices(dataset))
 
@@ -216,12 +254,11 @@ def main() -> None:
         num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY,
     )
 
-    model = SpineFoundationModel().to(DEVICE)
-    checkpoint = torch.load(checkpoint_path, map_location=DEVICE,
-                            weights_only=False)
-    model.load_state_dict(checkpoint["model_state_dict"])
-
-    results = compute_metrics(model, val_loader, args.max_samples)
+    results = compute_metrics(
+        model, val_loader, args.max_samples,
+        pixel_scale=image_size,
+        ddd_available=bool(tasks.get("ddd", False)),
+    )
 
     print_summary(results)
 

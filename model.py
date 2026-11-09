@@ -2,166 +2,333 @@
 model.py
 ========
 
-Spine Foundation Model — DDD-only multi-task architecture.
+Spine Foundation Model — spatial multi-task architecture (DDD + anatomy).
 
-Focus
------
-Disc Degenerative Disease (DDD) only, graded with the Pfirrmann scale
-(grades I..V) per disc level on sagittal T2 lumbar MRI.
+Why this file was rebuilt
+-------------------------
+The previous version pooled the backbone with **global average pooling**
+before regressing the 10 landmarks.  Global pooling throws away *where*
+things are in the image, so the coordinate head could only learn the
+population-average spine position — the "boxes" landed in the wrong place
+for individual patients.
+
+This version keeps a dense feature map and predicts a **heatmap per
+keypoint** (the standard, reliable approach for landmark localisation,
+as used by HRNet / stacked-hourglass / YOLO-pose).  Coordinates are
+obtained with a differentiable soft-argmax.  A Feature Pyramid Network
+(FPN) fuses ConvNeXt stages so both small discs and large vertebrae are
+localised accurately.
 
 Tasks
 -----
-1. Landmark localization : 10 points (L1-L5 vertebral centres + 5 disc
-   centres) with per-point self-supervised confidence.
+1. Landmark localisation : 10 points (L1-L5 vertebral centres + 5 disc
+   centres), one Gaussian heatmap per point + per-point confidence.
 2. Disc degeneration     : per-level Pfirrmann grade (5-class
-   classification, I..V). Each disc is classified from a *disc-localized*
-   feature vector obtained by Gaussian-attention pooling of the spatial
-   feature map around the disc centre predicted by the coordinate head.
-   Localizing per-disc features (instead of a single global embedding)
-   substantially improves grading accuracy.
+   classification) from a Gaussian-attention-pooled disc patch.
+3. Segmentation          : optional 4-class mask (background / vertebra /
+   disc / spinal canal) from the same dense features.  Trained only when
+   masks are available; ignored otherwise.
 
 Outputs (forward)
 -----------------
 {
-    "coords":              Tensor(B,20),
-    "localization_conf":   Tensor(B,10),
-    "ddd_logits":          Tensor(B,5,5),  # per-disc x Pfirrmann class logits
-    "features":            Tensor(B,512),  # shared embedding (for longitudinal)
+    "coords":            Tensor(B,20),           # x,y per keypoint in [0,1]
+    "localization_conf": Tensor(B,10),           # 0..1 per keypoint
+    "ddd_logits":        Tensor(B,5,5),          # disc x Pfirrmann logits
+    "features":          Tensor(B,512),          # embedding (longitudinal)
+    "heatmaps":          Tensor(B,10,Hf,Wf),     # dense keypoint heatmaps
+    "seg_logits":        Tensor(B,4,Hf,Wf),      # optional segmentation
 }
 """
 
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import timm
 
 import config as _cfg
+
+
+# ----------------------------------------------------------------------
+# Feature Pyramid Network
+# ----------------------------------------------------------------------
+
+class FPN(nn.Module):
+    """
+    Lightweight top-down FPN over the ConvNeXt stage outputs.
+
+    Returns a single dense feature map at the highest resolution stage
+    (stride 4 for ConvNeXt) so landmark heatmaps are sharp.
+    """
+
+    def __init__(self, in_channels: list[int], out_dim: int = 128):
+        super().__init__()
+        self.lateral = nn.ModuleList(
+            nn.Conv2d(c, out_dim, kernel_size=1) for c in in_channels
+        )
+        self.smooth = nn.Sequential(
+            nn.Conv2d(out_dim, out_dim, 3, padding=1, bias=False),
+            nn.BatchNorm2d(out_dim),
+            nn.GELU(),
+        )
+        self.out_dim = out_dim
+
+    def forward(self, feats: list[torch.Tensor]) -> torch.Tensor:
+        laterals = [conv(f) for conv, f in zip(self.lateral, feats)]
+        out = laterals[-1]
+        for i in range(len(laterals) - 2, -1, -1):
+            out = F.interpolate(
+                out, size=laterals[i].shape[-2:], mode="nearest"
+            )
+            out = laterals[i] + out
+        return self.smooth(out)
+
+
+# ----------------------------------------------------------------------
+# Helper heads
+# ----------------------------------------------------------------------
+
+def _soft_argmax_2d(
+    heatmaps: torch.Tensor,
+    temperature: float | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    Differentiable peak extraction.
+
+    Parameters
+    ----------
+    heatmaps : (B, K, H, W) logits
+    temperature : softmax sharpening factor.  Background logits sit near 0
+        while a trained gaussian peak is only ~1-2, so a plain softmax is
+        almost uniform and the expectation collapses to the image centre.
+        Multiplying the logits by a temperature > 1 makes the spatial
+        expectation actually read the peak.
+
+    Returns
+    -------
+    coords : (B, K*2) normalized (x, y) in [0,1]
+    peak   : (B, K)   peak probability (sharpened softmax max) in [0,1]
+    """
+    if temperature is None:
+        temperature = float(getattr(_cfg, "SOFTARGMAX_TEMPERATURE", 1.0))
+    b, k, h, w = heatmaps.shape
+    logits = heatmaps * float(temperature)
+    prob = torch.softmax(logits.flatten(2), dim=-1)            # (B,K,H*W)
+    xs = (torch.arange(w, device=heatmaps.device, dtype=heatmaps.dtype)
+          + 0.5) / w
+    ys = (torch.arange(h, device=heatmaps.device, dtype=heatmaps.dtype)
+          + 0.5) / h
+    grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+    grid_x = grid_x.reshape(-1)
+    grid_y = grid_y.reshape(-1)
+    x = (prob * grid_x).sum(dim=-1)
+    y = (prob * grid_y).sum(dim=-1)
+    coords = torch.stack([x, y], dim=-1).reshape(b, k * 2)
+    peak = prob.max(dim=-1).values
+    return coords, peak
 
 
 class _DiscLocalizedHead(nn.Module):
     """
     Classify each disc from a Gaussian-attention-pooled feature patch.
 
-    Given the spatial backbone feature map F (B,C,Hf,Wf) and the predicted
-    normalized disc centres (B,5,2) (x,y in [0,1] in the input image), build
-    a 2D Gaussian attention mask around each centre, pool F -> (B,5,C) and
-    run a shared classifier -> (B,5,5) Pfirrmann logits.
+    Given the dense FPN feature map F (B,C,Hf,Wf) and the disc centres
+    (B,5,2) in normalized coordinates, build a 2-D Gaussian attention
+    mask around each centre, pool F -> (B,5,C) and run a shared
+    classifier -> (B,5,5) Pfirrmann logits.
     """
 
-    def __init__(self, feature_dim: int, sigma_fraction: float = 0.5):
+    def __init__(self, feature_dim: int, num_discs: int,
+                 num_classes: int, sigma_fraction: float = 0.55):
         super().__init__()
-        self.sigma_fraction = sigma_fraction
-        # pooled is (B, num_discs, feature_dim) -> (B, num_discs, classes)
+        self.num_discs = int(num_discs)
+        self.num_classes = int(num_classes)
+        self.sigma_fraction = float(sigma_fraction)
         self.classifier = nn.Sequential(
             nn.Dropout(0.25),
             nn.Linear(feature_dim, 256),
             nn.GELU(),
-            nn.Linear(256, _cfg.NUM_PFRRMANN_CLASSES),
+            nn.Linear(256, self.num_classes),
         )
 
     def forward(self, fmap: torch.Tensor, disc_centers: torch.Tensor):
-        B, C, Hf, Wf = fmap.shape
-        # disc_centers: (B,5,2) normalized (x, y) in [0,1] -> feature-map px
-        fx = disc_centers[:, :, 0].clamp(0.0, 1.0).unsqueeze(-1).unsqueeze(-1) * (Wf - 1)
-        fy = disc_centers[:, :, 1].clamp(0.0, 1.0).unsqueeze(-1).unsqueeze(-1) * (Hf - 1)
-        yy = torch.arange(Hf, device=fmap.device, dtype=fmap.dtype).view(1, 1, Hf, 1)
-        xx = torch.arange(Wf, device=fmap.device, dtype=fmap.dtype).view(1, 1, 1, Wf)
+        b, c, hf, wf = fmap.shape
+        if disc_centers is None:
+            raise ValueError("disc_centers is required")
+        disc_centers = disc_centers.reshape(b, self.num_discs, 2)
+
+        fx = disc_centers[:, :, 0].clamp(0.0, 1.0).unsqueeze(-1).unsqueeze(-1)
+        fy = disc_centers[:, :, 1].clamp(0.0, 1.0).unsqueeze(-1).unsqueeze(-1)
+        fx = fx * (wf - 1)
+        fy = fy * (hf - 1)
+
+        yy = torch.arange(hf, device=fmap.device, dtype=fmap.dtype).view(
+            1, 1, hf, 1)
+        xx = torch.arange(wf, device=fmap.device, dtype=fmap.dtype).view(
+            1, 1, 1, wf)
         d2 = (xx - fx).square() + (yy - fy).square()          # (B,5,Hf,Wf)
-        sigma = self.sigma_fraction * max(Hf, Wf)
+
+        sigma = self.sigma_fraction * max(hf, wf)
         att = torch.exp(-d2 / (2.0 * sigma * sigma))
         att = att / att.sum(dim=(2, 3), keepdim=True).clamp(min=1e-6)
-        pooled = torch.einsum("bchw,bdwh->bdc", fmap, att)    # (B,5,C)
-        return self.classifier(pooled)                        # (B,5,5)
 
+        # fmap: (B,C,H,W), att: (B,D,H,W) -> (B,D,C)
+        pooled = torch.einsum("bchw,bdhw->bdc", fmap, att)
+        return self.classifier(pooled)                        # (B,5,classes)
+
+
+# ----------------------------------------------------------------------
+# Main model
+# ----------------------------------------------------------------------
 
 class SpineFoundationModel(nn.Module):
 
-    def __init__(self):
+    def __init__(
+        self,
+        model_name: str | None = None,
+        num_keypoints: int | None = None,
+        num_discs: int | None = None,
+        num_pfrrmann_classes: int | None = None,
+        num_seg_classes: int | None = None,
+        fpn_dim: int | None = None,
+        pretrained: bool | None = None,
+        disc_feature_stage: int | None = None,
+    ):
         super().__init__()
 
         # Config values are read at __init__ time (not import time) so that
-        # `utils.load_model` can apply per-checkpoint metadata (image size,
-        # feature stage, ...) before constructing the network.  Training
-        # always uses the module-level defaults from config.py.
-        disc_feature_stage = _cfg.DISC_FEATURE_STAGE
-        num_keypoints = _cfg.NUM_KEYPOINTS
-        num_discs = _cfg.NUM_DISCS
+        # `utils.load_model` can apply per-checkpoint metadata before
+        # constructing the network.
+        self.model_name = model_name or _cfg.MODEL_NAME
+        self.num_keypoints = int(num_keypoints or _cfg.NUM_KEYPOINTS)
+        self.num_discs = int(num_discs or _cfg.NUM_DISCS)
+        self.num_pfrrmann_classes = int(
+            num_pfrrmann_classes or _cfg.NUM_PFRRMANN_CLASSES)
+        self.num_seg_classes = int(num_seg_classes or _cfg.NUM_SEG_CLASSES)
+        self.fpn_dim = int(fpn_dim or _cfg.FPN_DIM)
+        self.disc_feature_stage = int(
+            disc_feature_stage or _cfg.DISC_FEATURE_STAGE)
 
-        # Spatial feature backbone (keeps a mid-stage feature map for
-        # disc-localized pooling). Stage index + global average pooling.
+        if pretrained is None:
+            pretrained = _cfg.PRETRAINED
+
+        # Spatial feature backbone.  Keep all stages for the FPN.
         self.backbone = timm.create_model(
-            "convnext_tiny",
-            pretrained=_cfg.PRETRAINED,
+            self.model_name,
+            pretrained=pretrained,
             features_only=True,
-            out_indices=(disc_feature_stage,),
         )
-        # Infer the spatial-channel dim of the selected stage.
-        with torch.no_grad():
-            dummy = self.backbone(torch.zeros(1, 3, 32, 32))
-        feature_dim = dummy[0].shape[1]
+        channels = list(self.backbone.feature_info.channels())
+        # Some small timm models expose fewer stages; use what exists.
+        self.fpn = FPN(channels, out_dim=self.fpn_dim)
+        fmap_channels = self.fpn_dim
 
+        # Keypoint heatmap head (one channel per landmark).
+        self.keypoint_head = nn.Sequential(
+            nn.Conv2d(fmap_channels, fmap_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(fmap_channels),
+            nn.GELU(),
+            nn.Conv2d(fmap_channels, self.num_keypoints, 1),
+        )
+        # Start with a low foreground prior so BCE does not explode.
+        nn.init.constant_(self.keypoint_head[-1].bias, -3.0)
+
+        # Segmentation head (optional task).
+        self.seg_head = nn.Sequential(
+            nn.Conv2d(fmap_channels, fmap_channels, 3, padding=1, bias=False),
+            nn.BatchNorm2d(fmap_channels),
+            nn.GELU(),
+            nn.Conv2d(fmap_channels, self.num_seg_classes, 1),
+        )
+
+        # Global embedding for confidence + longitudinal model.
         self.pool = nn.AdaptiveAvgPool2d(1)
-
         self.shared = nn.Sequential(
-            nn.BatchNorm1d(feature_dim),
+            nn.BatchNorm1d(fmap_channels),
             nn.Dropout(0.30),
-            nn.Linear(feature_dim, 512),
+            nn.Linear(fmap_channels, 512),
             nn.GELU(),
-        )
-
-        self.coordinate_head = nn.Sequential(
-            nn.Dropout(0.25),
-            nn.Linear(512, 256),
-            nn.GELU(),
-            nn.Linear(256, num_keypoints * 2),
         )
 
         self.localization_confidence_head = nn.Sequential(
             nn.Dropout(0.25),
             nn.Linear(512, 128),
             nn.GELU(),
-            nn.Linear(128, num_keypoints),
+            nn.Linear(128, self.num_keypoints),
         )
 
-        self.disc_head = _DiscLocalizedHead(feature_dim)
+        self.disc_head = _DiscLocalizedHead(
+            fmap_channels, self.num_discs, self.num_pfrrmann_classes,
+            sigma_fraction=float(getattr(_cfg, "DISC_POOL_SIGMA_FRACTION", 0.12)),
+        )
 
-    def forward(self, x):
+        # Soft-argmax temperature is resolved at construction time so that a
+        # checkpoint can pin the value it was trained with via metadata.
+        self.softargmax_temperature = float(
+            getattr(_cfg, "SOFTARGMAX_TEMPERATURE", 1.0)
+        )
 
-        fmap = self.backbone(x)[0]                     # (B,C,Hf,Wf)
-        g = self.pool(fmap).flatten(1)                 # (B,C)
-        features = self.shared(g)                      # (B,512)
+    # ------------------------------------------------------------------
+    def forward(
+        self,
+        x: torch.Tensor,
+        disc_centers: torch.Tensor | None = None,
+        return_seg: bool = True,
+    ) -> dict:
+        feats = self.backbone(x)                     # list of stage maps
+        fmap = self.fpn(feats)                       # (B,C,Hf,Wf) stride 4
+        b, c, hf, wf = fmap.shape
 
-        coords = torch.sigmoid(self.coordinate_head(features))
+        keypoint_logits = self.keypoint_head(fmap)   # (B,K,Hf,Wf)
+        coords, peak = _soft_argmax_2d(
+            keypoint_logits, self.softargmax_temperature
+        )
+
+        g = self.pool(fmap).flatten(1)
+        features = self.shared(g)
+
         localization_conf = torch.sigmoid(
             self.localization_confidence_head(features)
         )
 
-        # Disc centres = coords[10:20] (after 5 vertebra points), (x, y).
-        disc_centers = coords[:, 10:20].view(-1, _cfg.NUM_DISCS, 2)
+        # Disc pooling uses ground-truth centres during training when
+        # supplied (teacher forcing) and predicted centres at inference.
+        if disc_centers is None:
+            disc_centers = coords[:, self.num_discs * 2:].reshape(
+                b, self.num_discs, 2)
+        else:
+            disc_centers = disc_centers.reshape(b, self.num_discs, 2)
         ddd_logits = self.disc_head(fmap, disc_centers)
 
-        return {
+        out = {
             "coords": coords,
             "localization_conf": localization_conf,
             "ddd_logits": ddd_logits,
             "features": features,
+            "heatmaps": keypoint_logits,
+            "heatmap_peak": peak,
+            "fmap": fmap,
         }
+        if return_seg:
+            out["seg_logits"] = self.seg_head(fmap)
+        return out
 
     @torch.no_grad()
     def extract_features(self, x) -> torch.Tensor:
         """Shared 512-d image embedding used by the longitudinal model."""
         self.eval()
-        return self.forward(x)["features"]
+        return self.forward(x, return_seg=False)["features"]
 
 
 if __name__ == "__main__":
 
     model = SpineFoundationModel()
-
     x = torch.randn(2, 3, 256, 256)
-
     outputs = model(x)
 
     print()
-
     for name, value in outputs.items():
-        print(f"{name:20s} {tuple(value.shape)}")
+        if torch.is_tensor(value):
+            print(f"{name:20s} {tuple(value.shape)}")

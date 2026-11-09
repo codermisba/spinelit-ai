@@ -22,14 +22,12 @@ import pandas as pd
 import torch
 from PIL import Image
 from torch.utils.data import Dataset
-from torchvision import transforms
 
 from config import (
     DATA_DIR,
     DISC_LANDMARK_CSV,
     DDD_LABELS_CSV,
     DERIVE_VERTEBRA_CENTERS,
-    IMAGE_SIZE,
     NUM_DISCS,
     NUM_KEYPOINTS,
     NUM_PFRRMANN_CLASSES,
@@ -105,19 +103,23 @@ class SpineDataset(Dataset):
         )
 
         if transform is None:
-            transform = transforms.Compose(
-                [
-                    transforms.Resize((IMAGE_SIZE, IMAGE_SIZE)),
-                    transforms.ToTensor(),
-                ]
-            )
+            # Share the exact transform with inference (utils.get_transform).
+            # Import lazily so a checkpoint/config override applied after
+            # import (train.py --image-size, checkpoint meta) is honoured.
+            # Importing the constants directly was a real bug: training then
+            # used the module-import-time size while inference used the
+            # checkpoint size, silently mis-scaling every prediction.
+            from utils import get_transform
+            transform = get_transform()
         self.transform = transform
 
         self.level_order = list(DISC_LEVELS)
         self.vertebra_order = list(VERTEBRAE)
 
         self.groups = self.disc_csv.groupby("filename")
-        self.image_names = list(self.groups.groups.keys())
+        # Deterministic ordering is required for a reproducible
+        # train/validation split and for the on-disk image diagnostic.
+        self.image_names = sorted(self.groups.groups.keys())
 
         self.image_dirs = [
             DATA_DIR / "processed_spider_jpgs",
@@ -125,6 +127,7 @@ class SpineDataset(Dataset):
             DATA_DIR / "processed_osf_jpgs",
             DATA_DIR / "processed_tseg_jpgs",
         ]
+        self._image_cache: dict[str, Path] = {}
 
         # Task availability flag used by train.py to enable/disable the DDD loss
         self.has_ddd_labels = (
@@ -150,11 +153,28 @@ class SpineDataset(Dataset):
         return len(self.image_names)
 
     def _find_image(self, filename):
+        cached = self._image_cache.get(filename)
+        if cached is not None and cached.exists():
+            return cached
         for folder in self.image_dirs:
             image_path = folder / filename
             if image_path.exists():
+                self._image_cache[filename] = image_path
                 return image_path
-        raise FileNotFoundError(f"Image not found: {filename}")
+        raise FileNotFoundError(
+            f"Image not found: {filename} (searched "
+            f"{[str(d) for d in self.image_dirs]})"
+        )
+
+    def disc_points(self, filename: str) -> dict[str, tuple[float, float]]:
+        """Normalized disc centroids for one image (used by YOLO prep)."""
+        rows = self.groups.get_group(filename)
+        rows = rows.set_index("level")
+        out = {}
+        for level in self.level_order:
+            if level in rows.index:
+                out[level] = self._lookup(rows, level)
+        return out
 
     # ---------------------------------------------------------
     # Landmark assembly

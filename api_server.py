@@ -57,11 +57,12 @@ import logging
 import os
 import threading
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 from fastapi import Depends, FastAPI, File, Form, Header, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 from PIL import Image
@@ -136,17 +137,11 @@ def _get_engine() -> vision_engine.VisionEngine:
         return _ENGINE
     with _ENGINE_LOCK:
         if _ENGINE is None:
-            try:
-                _ENGINE = vision_engine.VisionEngine()
-            except weights.ModelResolutionError as exc:
-                logger.warning("No vision model: %s", exc)
-                _ENGINE = vision_engine.VisionEngine.__new__(vision_engine.VisionEngine)
-                _ENGINE._loaded = False
-                _ENGINE._checkpoint_name = None
-                _ENGINE._checkpoint_meta = {}
-                _ENGINE._model = None
-                _ENGINE._device = None
-                _ENGINE.error = str(exc)
+            # VisionEngine handles a missing checkpoint internally and sets
+            # `.error`; it never raises here, so the service always starts.
+            _ENGINE = vision_engine.VisionEngine()
+            if not _ENGINE.available:
+                logger.warning("No vision model: %s", _ENGINE.error)
     return _ENGINE
 
 
@@ -298,10 +293,21 @@ def mock_evidence_and_draw(image: Image.Image,
         landmark_conf=list(conf),
         geometric_indicators=geo,
         ddd=ddd,
+        ddd_available=True,
+        detections=[],
+        detection_source="landmark",
+        segmentation={"available": False, "source": "none"},
         notes=["MOCK VISION DEMO: synthetic detections."],
     )
-    annotated = draw_landmarks(
-        image, coords=points, confidence=conf)
+    from detector import landmark_detections
+    from utils import render_analysis
+
+    detections = landmark_detections(points, width, height)
+    card.detections = detections
+    annotated = render_analysis(
+        image, coords=points, confidence=conf, detections=None,
+        show_blocks=True, show_landmarks=True,
+    )
     return card, annotated
 
 
@@ -313,6 +319,12 @@ class AnalyzeResponse(DecisionSupportResult):
     """Full /api/analyze payload (decision-support result + evidence + overlay)."""
     evidence: dict = Field(default_factory=dict)
     annotated_image_data_url: str = ""
+    gradcam_image_data_url: str = ""
+    detections: list[dict] = Field(default_factory=list)
+    detection_source: str = ""
+    segmentation: dict = Field(default_factory=dict)
+    gradcam: dict = Field(default_factory=dict)
+    ddd_available: bool = False
     model_status: dict = Field(default_factory=dict)
     mock_vision: bool = False
 
@@ -325,11 +337,26 @@ def root():
         "version": APP_VERSION,
         "docs": "/docs",
         "openapi": "/openapi.json",
-        "endpoints": ["/api/health", "/api/analyze"],
+        "ui": "/ui",
+        "endpoints": ["/api/health", "/api/analyze", "/ui"],
         "vision": engine.status(),
         "registry": weights.cache_config_summary(),
         "gemini_configured": _gemini_configured(),
     }
+
+
+UI_PATH = Path(__file__).resolve().parent / "examples" / "frontend_demo.html"
+
+
+@app.get("/ui", include_in_schema=False)
+def ui():
+    """Serve the bundled single-page frontend demo."""
+    if not UI_PATH.exists():
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"Frontend not found at {UI_PATH}"},
+        )
+    return FileResponse(UI_PATH, media_type="text/html")
 
 
 @app.get("/api/health")
@@ -355,6 +382,7 @@ async def analyze(
     clinical: str = Form("{}"),
     spondy_predictions: str = Form("[]"),
     mock_vision: str = Form(""),
+    explain: str = Form("true"),
 ):
     if isinstance(auth_success, JSONResponse):
         return auth_success
@@ -370,8 +398,14 @@ async def analyze(
     except Exception as exc:  # noqa: BLE001
         return JSONResponse(status_code=400, content={"detail": f"Bad image: {exc}"})
 
+    gradcam_image = None
     if mock_mode:
         card, annotated = mock_evidence_and_draw(image, file.filename or "")
+        detections = list(card.detections)
+        detection_source = card.detection_source
+        segmentation = dict(card.segmentation)
+        gradcam = {}
+        ddd_available = True
     elif not engine.available:
         return JSONResponse(
             status_code=503,
@@ -385,9 +419,28 @@ async def analyze(
             },
         )
     else:
-        # Vision inference (single forward pass on the threadpool).
-        card, annotated = await run_in_threadpool(
-            engine.analyze_and_draw, image, file.filename or "")
+        # Full vision inference (single forward pass on the threadpool).
+        result = await run_in_threadpool(
+            engine.analyze_full,
+            image,
+            file.filename or "",
+            explain.strip().lower() == "true",
+        )
+        card = result["card"]
+        annotated = result["annotated_image"]
+        detections = result["detections"]
+        detection_source = result["detection_source"]
+        segmentation = result["segmentation"]
+        gradcam = result.get("gradcam") or {}
+        ddd_available = bool(result["card"].ddd_available)
+
+        heatmap = gradcam.get("heatmap")
+        if heatmap is not None:
+            try:
+                from explainability import overlay_heatmap
+                gradcam_image = overlay_heatmap(image, heatmap, alpha=0.55)
+            except Exception:  # noqa: BLE001 - optional
+                gradcam_image = None
 
     try:
         clinical_ctx = json.loads(clinical or "{}")
@@ -419,6 +472,16 @@ async def analyze(
     payload = result.model_dump(mode="json")
     payload["evidence"] = card.model_dump(mode="json")
     payload["annotated_image_data_url"] = _png_data_url(annotated)
+    payload["gradcam_image_data_url"] = (
+        _png_data_url(gradcam_image) if gradcam_image is not None else ""
+    )
+    payload["detections"] = detections
+    payload["detection_source"] = detection_source
+    payload["segmentation"] = segmentation
+    payload["gradcam"] = {
+        k: v for k, v in gradcam.items() if k != "heatmap"
+    }
+    payload["ddd_available"] = ddd_available
     payload["model_status"] = engine.status()
     payload["mock_vision"] = mock_mode
     return payload

@@ -8,6 +8,7 @@ degrade gracefully.  The demo path only runs when mock_vision=true.
 
 import base64
 
+import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
@@ -16,6 +17,21 @@ from api_server import app, evidence_to_inputs, _png_data_url
 from schemas import EvidenceCard, LevelFinding
 
 client = TestClient(app)
+
+
+@pytest.fixture
+def missing_checkpoint(monkeypatch, tmp_path):
+    """Force a deterministic 'no model available' state.
+
+    These tests must not depend on whether the developer has trained a
+    checkpoint locally, so point the registry at a file that cannot exist and
+    drop the cached engine.  monkeypatch restores both at teardown.
+    """
+    monkeypatch.setenv(
+        "VISION_CHECKPOINT", str(tmp_path / "definitely_missing_model.pth")
+    )
+    monkeypatch.setattr(api_server, "_ENGINE", None)
+    return tmp_path
 
 
 def test_health_reports_status_ok():
@@ -37,7 +53,9 @@ def test_root_reports_service_metadata():
     assert "registry" in body
 
 
-def test_analyze_without_checkpoint_returns_503_when_mock_disabled():
+def test_analyze_without_checkpoint_returns_503_when_mock_disabled(
+    missing_checkpoint,
+):
     r = client.post(
         "/api/analyze",
         files={"file": ("scan.png", _png_bytes(), "image/png")},
@@ -49,7 +67,9 @@ def test_analyze_without_checkpoint_returns_503_when_mock_disabled():
     assert body.get("model_status") is not None
 
 
-def test_analyze_without_checkpoint_never_falls_back_to_mock_by_default():
+def test_analyze_without_checkpoint_never_falls_back_to_mock_by_default(
+    missing_checkpoint,
+):
     r = client.post(
         "/api/analyze",
         files={"file": ("scan.png", _png_bytes(), "image/png")},

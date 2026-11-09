@@ -115,11 +115,61 @@ GRAD_CLIP_NORM = 1.0
 
 EARLY_STOPPING_PATIENCE = 10
 
+# Checkpoint selection score = val_loss + w * (keypoint_error_px / image_size).
+# Localisation error is the product's primary output ("does it plot the right
+# blocks?"), so a model with much better landmarks must not be discarded just
+# because its confidence-calibration loss is temporarily higher.
+LOCALIZATION_SELECTION_WEIGHT = 5.0
+
+
+# ==========================================================
+# Image normalisation (MUST match training and inference)
+# ==========================================================
+# torchvision `ToTensor()` alone leaves pixels in 0..1.  ImageNet-pretrained
+# backbones (ConvNeXt) expect the standard ImageNet statistics; using them
+# consistently is one of the biggest accuracy wins in this pipeline.
+USE_IMAGENET_NORM = True
+IMAGENET_MEAN = (0.485, 0.456, 0.406)
+IMAGENET_STD = (0.229, 0.224, 0.225)
+
+
+# ==========================================================
+# Vision architecture (spatial heatmap localizer + FPN)
+# ==========================================================
+# The earlier design pooled the whole feature map with global average
+# pooling and then regressed coordinates from that vector.  GAP destroys
+# the spatial layout, so the head could only learn the *average* spine
+# position.  The rebuilt model keeps a dense feature map (FPN at stride 4)
+# and predicts one heatmap per keypoint -> soft-argmax coordinates.  That
+# is what makes per-image, per-vertebra localisation possible.
+FPN_DIM = 128                # channels in the fused dense feature map
+HEATMAP_STRIDE = 4           # output stride of the keypoint heatmaps
+HEATMAP_SIGMA = 2.0          # gaussian target radius (feature-map pixels)
+# Soft-argmax temperature.  Logits are not probabilities: background logits
+# sit near 0 while a trained gaussian peak is only ~1-2.  A plain softmax is
+# therefore almost uniform and the coordinate expectation collapses to the
+# image centre even when the heatmap peak is correct.  Sharpening the logits
+# before the spatial softmax makes the integral-soft-argmax read the peak
+# (validated: 5.5 px vs 32 px mean error at the same checkpoint).
+SOFTARGMAX_TEMPERATURE = 10.0
+# Gaussian pooling radius for the per-disc DDD classifier, as a fraction of
+# the fused feature map's size.  Small enough to pool around ONE disc, large
+# enough to include the whole endplate; ~12% ≈ 5 px at 40x40 (20 px at 160px).
+DISC_POOL_SIGMA_FRACTION = 0.12
+NUM_SEG_CLASSES = 4          # background, vertebra, disc, spinal canal
+SEG_CLASS_NAMES = ["background", "vertebra", "disc", "spinal_canal"]
+SEG_CLASS_COLOURS = {
+    "vertebra": (80, 200, 255),
+    "disc": (255, 200, 60),
+    "spinal_canal": (140, 255, 140),
+}
 
 # Multi-task loss weights
-COORD_LOSS_WEIGHT = 1.0
+COORD_LOSS_WEIGHT = 1.0       # direct soft-argmax coordinate regression
+HEATMAP_LOSS_WEIGHT = 2.0     # dense gaussian heatmap supervision (main signal)
 CONF_LOSS_WEIGHT = 0.1
-DDD_LOSS_WEIGHT = 1.0       # auto-disabled when no Pfirrmann labels exist
+DDD_LOSS_WEIGHT = 1.0         # auto-disabled when no Pfirrmann labels exist
+SEG_LOSS_WEIGHT = 1.0         # auto-disabled when no masks are available
 # Label smoothing for the Pfirrmann cross-entropy (grading is ordinal and
 # labels can be noisy; smoothing stabilizes training).
 DDD_LABEL_SMOOTHING = 0.1
@@ -187,6 +237,13 @@ LAST_MODEL = CHECKPOINT_DIR / "last_model.pth"
 # works without retraining (created via: python export_release.py)
 RELEASE_MODEL = CHECKPOINT_DIR / "release_model.pth"
 
+# Optional YOLO detector (boxes for vertebrae + discs) and U-Net
+# segmentation model.  Both are optional: the API falls back to
+# landmark-derived blocks when they are absent.
+YOLO_CHECKPOINT = CHECKPOINT_DIR / "yolo_best.pt"
+YOLO_DATA_DIR = ROOT_DIR / "dataset" / "yolo"
+SEG_CHECKPOINT = CHECKPOINT_DIR / "segmentation.pth"
+
 LOG_FILE = LOG_DIR / "training_log.csv"
 
 PRINT_EVERY = 10
@@ -197,6 +254,12 @@ PRINT_EVERY = 10
 # ==========================================================
 
 CONFIDENCE_THRESHOLD = 0.50
+
+# Detection / overlay defaults
+YOLO_CONF_THRESHOLD = 0.25
+YOLO_IOU_THRESHOLD = 0.45
+KEYPOINT_CONF_THRESHOLD = 0.20
+SEG_OVERLAY_ALPHA = 0.38
 
 
 IMAGE_EXTENSIONS = (

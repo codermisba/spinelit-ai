@@ -27,7 +27,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, Field
 
-from config import DISC_LEVELS
+from config import DISC_LEVELS, VERTEBRAE
 
 
 # ------------------------------------------------------------------
@@ -77,10 +77,16 @@ class EvidenceCard(BaseModel):
     """All machine-produced evidence for a case (vision + longitudinal)."""
     image_processed: bool = False
     image_name: str = ""
+    image_size: list[int] = Field(default_factory=list)  # [width, height]
     landmark_points: list[list[float]] = Field(default_factory=list)
     landmark_conf: list[float] = Field(default_factory=list)
     geometric_indicators: list[dict] = Field(default_factory=list)
     ddd: list[LevelFinding] = Field(default_factory=list)
+    ddd_available: bool = True
+    detections: list[dict] = Field(default_factory=list)
+    detection_source: str = ""
+    segmentation: dict = Field(default_factory=dict)
+    model_tasks: dict = Field(default_factory=dict)
     notes: list[str] = Field(default_factory=list)
 
 
@@ -197,12 +203,30 @@ def build_evidence_card(
     ddd_conf,
     image_name: str = "",
     calibrate=None,
+    ddd_available: bool = True,
+    image_size=None,
 ) -> EvidenceCard:
     """Assemble a full EvidenceCard from raw vision-engine arrays."""
-    card = EvidenceCard(image_processed=True, image_name=image_name)
+    card = EvidenceCard(
+        image_processed=True,
+        image_name=image_name,
+        ddd_available=bool(ddd_available),
+    )
+    if image_size is not None:
+        card.image_size = [int(image_size[0]), int(image_size[1])]
     card.landmark_points = [[float(x), float(y)] for x, y in points]
     card.landmark_conf = [float(c) for c in localization_conf]
     card.geometric_indicators = list(geo)
+
+    # When the Pfirrmann head was never trained (no ddd_labels.csv) we must
+    # not report random grades.  Landmarks + geometry are still valid.
+    if not ddd_available:
+        card.notes.append(
+            "DDD (Pfirrmann) grading unavailable: the checkpoint has no "
+            "trained DDD head (dataset/ddd_labels.csv was absent at training "
+            "time). Landmark localisation and geometry are still valid."
+        )
+        return card
 
     for i, level in enumerate(DISC_LEVELS):
         g_grade = float(ddd_grade[i])
@@ -224,7 +248,9 @@ def build_evidence_card(
             class_probabilities=g_prob_row,
             raw_confidence=round(g_rc, 3),
             calibrated_probability=round(g_prob, 3),
-            localization_quality=round(float(localization_conf[i]), 3),
+            localization_quality=round(
+                float(localization_conf[len(VERTEBRAE) + i]), 3
+            ),
             evidence=g_ev,
         ))
 

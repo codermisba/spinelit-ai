@@ -36,7 +36,7 @@ from config import (
     DISC_LEVELS,
 )
 from calibration import _Calibrators
-from utils import decode_outputs, load_model, preprocess_image
+from utils import decode_outputs, load_model, predict, preprocess_image
 
 
 def _load_labels(path: Path) -> pd.DataFrame | None:
@@ -74,9 +74,19 @@ def main() -> None:
                     help="path to model checkpoint (default best_model.pth)")
     args = ap.parse_args()
 
-    model, device, ckpt, _ = load_model(args.checkpoint or "checkpoints/best_model.pth")
+    model, device, ckpt, meta = load_model(
+        args.checkpoint or "checkpoints/best_model.pth")
     model.eval()
     print(f"Loaded : {ckpt}")
+
+    tasks = dict(meta.get("tasks") or {})
+    if not tasks.get("ddd", False):
+        print(
+            "[skip] This checkpoint has no trained DDD head "
+            "(dataset/ddd_labels.csv was absent at training time). "
+            "Nothing to calibrate; keeping the existing calibrator."
+        )
+        return
 
     calibrators = _Calibrators()
 
@@ -88,7 +98,7 @@ def main() -> None:
             if img_path is None:
                 continue
             img = Image.open(img_path).convert("RGB")
-            outputs = model(preprocess_image(img).unsqueeze(0).to(device))
+            outputs = predict(model, preprocess_image(img), device)
             dec = decode_outputs(outputs)
             idx = DISC_LEVELS.index(level)
             y_disease = 1.0 if grade >= 2 else 0.0   # Pfirrmann 2+ = DDD

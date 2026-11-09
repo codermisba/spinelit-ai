@@ -27,7 +27,7 @@ and writes a radiologist-style report — where every finding carries a
         └────────────────────────────────────────────────────────────────┘
                                           ▼
         ┌────────────────────────────────────────────────────────────────┐
-        │  2 · Vision Engine (agent)  [ConvNeXt-tiny via timm]           │
+        │  2 · Vision Engine (agent)  [ConvNeXt + FPN heatmaps]         │
         │      vertebra/disc localization + confidence                   │
         │      DDD Pfirrmann grade (I..V) + calibrated P(DDD)            │
         │      geometric indicators (narrowed space / offset)            │
@@ -117,29 +117,98 @@ recommended) or `"ollama"` for a fully local model.
 
 ---
 
-## Train the vision engine (Colab GPU, recommended)
+## Train the vision engine
 
-The imaging model has no weights committed (kept out of Git like the robot
-norm). Train it on Colab:
+The imaging model weights stay out of Git (like the rest of the trained
+artefacts). The **localizer** is a ConvNeXt + FPN heatmap network with
+differentiable soft-argmax (see [`model.py`](model.py)) — it learns *where*
+each vertebra/disc is, instead of regressing the population-average position
+from a globally pooled vector.
+
+### Checkpoint in this working copy
+
+`checkpoints/best_model.pth` is a `convnext_femto` model trained at **256 px**
+on the SPIDER landmark set with the CPU command below. On the held-out
+validation split (1690 visible points):
+
+| Metric | Result |
+|---|---|
+| Mean localization error | **2.35 px** (0.0092 normalized) |
+| PCK@5% (≤ 5% image size) | **97.16%** |
+| PCK@10% (≤ 10% image size) | **97.93%** |
+| Mean landmark confidence | 0.888 |
+| DDD / segmentation | unavailable (no labels / no masks) |
+
+Inspect it directly:
+
+```bash
+python evaluate.py --checkpoint checkpoints/best_model.pth
+python preview_predictions.py --num 4       # predicted vs GT side-by-side
+```
+
+`preview_predictions.py` writes `outputs/predictions/*_compare.png` (an MRI
+with predicted blocks next to the same MRI with ground truth) plus
+`summary.txt` with per-point pixel errors, so the blocks can be checked by eye.
+
+### Local CPU run (works on 8 GB RAM, no GPU)
+
+```bash
+# same profile as the checkpoint above: 256 px, femto backbone
+python train.py --epochs 18 --image-size 256 --batch-size 8 \
+    --model convnext_femto --lr 2e-4
+
+# 160 px is ~2.5x faster; both sizes are honoured end-to-end now
+python train.py --epochs 18 --image-size 160 --batch-size 8 \
+    --model convnext_femto --lr 2e-4
+
+# continue an interrupted run from checkpoints/last_model.pth
+python train.py --epochs 18 --image-size 256 --batch-size 8 \
+    --model convnext_femto --lr 2e-4 --resume
+
+# quantitative evaluation (px error, PCK@5/10, per-point table)
+python evaluate.py --checkpoint checkpoints/best_model.pth
+```
+
+`--image-size` is honoured by the data pipeline: `dataset.py` builds its
+transform through `utils.get_transform()`, which reads the runtime
+`config.IMAGE_SIZE`. This was a real bug (the constant used to be bound at
+import time), so training at 160 px while inference used 256 px silently
+degraded the API. A regression test in `tests/test_dataset.py` guards it.
+
+Checkpoints carry their own `meta` (`image_size`, `model_name`, `fpn_dim`,
+`softargmax_temperature`, `tasks`), so evaluation, the API and Grad-CAM all
+preprocess with exactly the training-time configuration.
+
+### Colab GPU (recommended for best accuracy)
 
 1. Open `colab_training.ipynb`, run `prepare_spider.py` on the downloaded
    SPIDER dataset (218 patients, 447 sagittal T2/T2-SPACE series, CC-BY 4.0)
-   to build `dataset/coords_pretrain.csv` and `dataset/ddd_labels.csv` and
-   write the JPGs, then run all cells.
+   to build `dataset/coords_pretrain.csv` and write the JPGs, then run all
+   cells.
 2. Store `best_model.pth` in `checkpoints/` for the pipeline to find it
    (default `checkpoints/best_model.pth`).
 
-For **real calibrated probabilities**, provide grading labels and run:
+### Optional heads
 
-```bash
-python train_calibrator.py   # fits isotonic calibration from labelled data
-```
+- **Segmentation (U-Net)** — `python train_segmentation.py` on a folder or
+  nnU-Net raw layout; inference uses `checkpoints/segmentation.pth`.
+  Without masks the API reports segmentation as *unavailable*.
+- **YOLO detector** — `python yolo_prep.py --from_landmarks` builds
+  pseudo-boxes from the landmark CSV, then `python yolo_train.py` writes
+  `checkpoints/yolo_best.pt`. Detection priority is
+  YOLO → segmentation boxes → landmark-derived blocks, always labelled with
+  its source.
+- **DDD / Pfirrmann head** — only trained when `dataset/ddd_labels.csv`
+  exists. Without labels the API reports `ddd_available=false` and shows no
+  grades rather than random ones.
+- **Calibration** — `python train_calibrator.py` fits isotonic calibration
+  from labelled data (skips cleanly when no trained DDD head exists).
 
 Without a checkpoint the pipeline still runs in a **degraded mode**: it shows
 the LLM reasoning/report skeleton and clear model-status, but vision tables
 stay empty until the model is trained.
 
-## Hosted API (live link)
+## Hosted API + frontend
 
 The vision engine + decision-support layer are exposed as a REST API that you
 can host on **Hugging Face Spaces** or **Render** and call straight from any
@@ -147,22 +216,73 @@ frontend over HTTPS:
 
 - `GET  /` and `GET /api/health` — service metadata, model status/version
 - `POST /api/analyze` — multipart `file` upload → annotated overlay
-  (data-URL PNG), per-level DDD table, report, model version
+  (data-URL PNG), Grad-CAM overlay, per-level DDD table, detections with their
+  source, report and model version
+- `GET  /ui` — bundled single-page frontend (`examples/frontend_demo.html`)
+- `GET  /docs` — interactive OpenAPI/Swagger UI
 
 ```bash
-uvicorn api_server:app --host 0.0.0.0 --port 7860   # locally
+uvicorn api_server:app --host 0.0.0.0 --port 8000   # locally
+# open http://127.0.0.1:8000/ui
+```
+
+The local API uses `checkpoints/best_model.pth` automatically. On a fresh
+clone (no local checkpoint) publish the weights to the Hub first and set
+`MODEL_ID`, otherwise `/api/analyze` correctly returns **503** instead of
+inventing results.
+
+### Where to deploy
+
+| Target | How |
+|---|---|
+| **Hugging Face Spaces** (free CPU, recommended) | Create a **Docker** Space, push this repo, set `MODEL_ID` (and `HF_TOKEN` if the model repo is private). Public URL: `https://<you>-<space>.hf.space`. |
+| **Render** | New **Web Service** → Docker runtime → same env vars. URL: `https://<service>.onrender.com`. |
+| **Any VPS / Docker host** | `docker build -t spine-api . && docker run -p 8000:8000 -e MODEL_ID=you/spine-severity spine-api` |
+
+The model is **not baked into the image** (`checkpoints/*.pth` is ignored by
+Git and Docker). Publish it once, then every host downloads the active
+version at startup:
+
+```bash
+python publish_model.py --repo you/spine-severity
+# host env: MODEL_ID=you/spine-severity
+```
+
+See [`docs/DEPLOY_API.md`](docs/DEPLOY_API.md) for the full step-by-step.
+
+Call it from your own frontend:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/analyze \
+     -F "file=@scan.jpg" -F "explain=true" -F "use_llm=false"
+```
+
+```js
+const fd = new FormData();
+fd.append("file", fileInput.files[0]);
+fd.append("explain", "true");
+const res = await fetch("http://127.0.0.1:8000/api/analyze", {
+  method: "POST", body: fd,
+});
+const data = await res.json();
+document.querySelector("#annotated").src = data.annotated_image_data_url;
+document.querySelector("#gradcam").src = data.gradcam_image_data_url;
 ```
 
 Retraining keeps working without code changes: weights are versioned on the
 HF Hub (`weights.py` registry), and each checkpoint carries its own metadata
-(`image_size`, `disc_feature_stage`, `version`) that is applied at load time.
+(`image_size`, `model_name`, `fpn_dim`, `softargmax_temperature`, `tasks`) that
+is applied at load time.
 
-- Deploy guide → [`docs/DEPLOY_API.md`](docs/DEPLOY_API.md)
+- Full deployment guide → [`docs/DEPLOY_API.md`](docs/DEPLOY_API.md)
 - Ready-to-use frontend page → [`examples/frontend_demo.html`](examples/frontend_demo.html)
 - Publish retrained weights → `python publish_model.py --repo you/spine-severity --with-calibration`
 
-Forwards-safe: `/api/analyze` returns `503` (never fake results) when no model
-is configured, unless the caller explicitly passes `mock_vision=true`.
+Unavailable tasks are reported honestly: `/api/analyze` returns
+`ddd_available=false` when no Pfirrmann labels were used, segmentation
+`available=false` without `checkpoints/segmentation.pth`, and `503` (never
+fake results) when no model is configured — unless the caller explicitly
+passes `mock_vision=true`.
 
 ---
 
@@ -256,18 +376,34 @@ as such in the legend.
 
 ## Imaging model (vision core)
 
-- Backbone: **ConvNeXt-Tiny** pretrained on ImageNet via `timm`, shared 512-d
-  embedding feeding multiple heads (see [`model.py`](model.py)):
-  - coordinate head → L1–L5 + disc centres, with per-point self-supervised
-    confidence
-  - DDD head → per-level Pfirrmann grade (multi-class softmax, cross-entropy)
+- Backbone: **ConvNeXt** (configurable; `convnext_femto` for CPU,
+  `convnext_tiny` on GPU) pretrained on ImageNet via `timm`.
+- **FPN at stride 4** fuses all backbone stages into a dense feature map.
+- **Landmark head** — one Gaussian heatmap per keypoint (L1–L5 + 5 discs);
+  coordinates come from a differentiable **soft-argmax** with a sharpening
+  temperature (`SOFTARGMAX_TEMPERATURE`) so the expectation reads the actual
+  peak instead of collapsing to the image centre.  Per-point confidence is a
+  learned head supervised by the model's own localisation error.
+- **DDD head** — Gaussian-attention pooling around each disc centre →
+  per-level Pfirrmann grade (5-class softmax).  Only trained when
+  `dataset/ddd_labels.csv` exists; otherwise reported as unavailable.
+- **Segmentation head / U-Net** — optional; standalone `segmentation.py`
+  U-Net with Dice+CE training (`train_segmentation.py`).  No masks ⇒ no
+  fabricated masks.
+- **Detector** — optional Ultralytics YOLO (`detector.py`, `yolo_train.py`)
+  with landmark/segmentation fallbacks; every box is labelled with its source.
+- **Grad-CAM** — hooks the fused FPN feature map (the tensor the DDD head
+  consumes).  With a trained DDD head it explains the predicted grade; without
+  Pfirrmann labels it returns a **localization** CAM for the least confident
+  landmark, tagged `kind="localization"` so it is never presented as a grade
+  explanation (`gradcam_demo.py` refuses to imply otherwise).
 - Longitudinal `LongitudinalRiskModel` fuses clinical features + image
   embedding to predict future grades and progression risk
   ([`clinical_model.py`](clinical_model.py)).
 
-The pipeline's accuracy is bounded by the vision engine, so training the
-localizer on a good labelled set (and fitting the calibrator) is the priority
-for a strong final-year result.
+All preprocessing (resize, ImageNet normalisation) is shared between training,
+evaluation, Grad-CAM and the API (`utils.get_transform`), so inference matches
+training exactly.
 
 ---
 
@@ -279,7 +415,11 @@ for a strong final-year result.
 - [x] Deterministic decision-support safety layer (evidence fusion,
       contradiction rules, report validation, audit trail, fallback report)
 - [x] Thin-line anatomical overlay on annotated images (keypoint-derived)
+- [x] Localizer trained on SPIDER landmarks (256 px CPU checkpoint,
+      2.35 px mean error / 97.9% PCK@10 on the validation split)
 - [x] Test suite for the §28 decision-support acceptance scenarios
-- [ ] Train localizer + DDD head on labelled data (Colab)
+- [x] Hosted API (`/api/analyze`, `/ui`, `/docs`) with honest task gating
+- [ ] Train the DDD/Pfirrmann head (needs `dataset/ddd_labels.csv`)
+- [ ] Train segmentation/YOLO on real masks (needs SPIDER masks)
 - [ ] Fit calibration from labels; report calibration curves / AUROC
 - [ ] Extend to additional spine diseases / 3D (MRI) inputs

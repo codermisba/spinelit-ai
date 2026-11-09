@@ -14,6 +14,7 @@ from utils import (
     draw_thin_anatomy_overlay,
     BODY_OUTLINE_COLOUR,
     ANATOMY_LINE_WIDTH,
+    VERTEBRA_COLOURS,
 )
 
 
@@ -102,3 +103,16 @@ def test_overlay_offset_labels_can_be_suppressed():
     assert (no_text.reshape(-1, 3) == target).all(axis=-1).sum() > 100
     # Text pixels change when labels are suppressed (glyph area differs).
     assert int((with_text != no_text).any(axis=-1).sum()) > 0
+
+
+def test_legend_does_not_hide_a_top_left_landmark():
+    """The legend is a background layer: markers must stay on top of it."""
+    img = _blank_image()
+    coords = _dummy_coords()
+    coords[0] = [0.42, 0.16]          # L1 inside the legend area
+    out = np.asarray(
+        draw_landmarks(img, coords, confidence=[0.9] * 10, anatomy_lines=False)
+    )
+    x = int(round(coords[0, 0] * img.width))
+    y = int(round(coords[0, 1] * img.height))
+    assert tuple(int(v) for v in out[y, x][:3]) == VERTEBRA_COLOURS[0]

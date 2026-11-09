@@ -129,16 +129,136 @@ def process_case(image_path: Path, mask_path: Path, image_out: Path,
     return bool(boxes)
 
 
+def _write_data_yaml(out_dir: Path) -> Path:
+    """Write the Ultralytics dataset descriptor (classes: vertebra, disc)."""
+    yaml_path = out_dir / "data.yaml"
+    yaml_path.write_text(
+        "path: " + str(out_dir.resolve()).replace("\\", "/") + "\n"
+        "train: train.txt\n"
+        "val: val.txt\n"
+        "names:\n"
+        "  0: vertebra\n"
+        "  1: disc\n"
+    )
+    return yaml_path
+
+
+def prepare_from_landmarks(
+    out_dir: Path,
+    csv_path: Path | None = None,
+    copy_images: bool = True,
+) -> dict:
+    """
+    Build a YOLO detection dataset with **zero manual annotation** from the
+    existing expert/keypoint landmark CSV.
+
+    The vertebra and disc boxes are derived from the same 10 keypoints the
+    localizer uses (``utils.landmark_boxes``).  They are pseudo-boxes: the
+    detector trained on them learns the anatomy the keypoints describe, and
+    the API still prefers true detector output only when this model exists.
+    """
+    import shutil
+
+    from config import DISC_LANDMARK_CSV, DISC_LEVELS, NUM_VERTEBRAE
+    from dataset import SpineDataset
+    from utils import landmark_boxes
+
+    csv_path = Path(csv_path or DISC_LANDMARK_CSV)
+    dataset = SpineDataset(disc_annotation_file=csv_path)
+
+    image_out = out_dir / "images"
+    label_out = out_dir / "labels"
+    image_out.mkdir(parents=True, exist_ok=True)
+    label_out.mkdir(parents=True, exist_ok=True)
+
+    image_paths: list[str] = []
+    skipped = 0
+    for filename in dataset.image_names:
+        try:
+            src = dataset._find_image(filename)
+        except FileNotFoundError:
+            skipped += 1
+            continue
+
+        with Image.open(src) as im:
+            width, height = im.size
+        coords, visibility = dataset._get_landmarks(filename)
+        boxes = landmark_boxes(coords, width, height, include_discs=True)
+
+        lines = []
+        for item in boxes:
+            label_index = visibility[NUM_VERTEBRAE + DISC_LEVELS.index(
+                item["label"])] if item["class_name"] == "disc" else 1.0
+            if label_index <= 0:
+                continue
+            x0, y0, x1, y1 = item["box"]
+            x0, x1 = max(0.0, min(width, x0)), max(0.0, min(width, x1))
+            y0, y1 = max(0.0, min(height, y0)), max(0.0, min(height, y1))
+            bw, bh = x1 - x0, y1 - y0
+            if bw < 2 or bh < 2:
+                continue
+            cls = 1 if item["class_name"] == "disc" else 0
+            xc = (x0 + x1) / 2.0 / width
+            yc = (y0 + y1) / 2.0 / height
+            lines.append(f"{cls} {xc:.6f} {yc:.6f} "
+                         f"{bw/width:.6f} {bh/height:.6f}")
+
+        if not lines:
+            skipped += 1
+            continue
+
+        dst = image_out / filename
+        if copy_images:
+            shutil.copyfile(src, dst)
+        else:
+            dst.write_bytes(src.read_bytes())
+        (label_out / f"{Path(filename).stem}.txt").write_text(
+            "\n".join(lines) + "\n"
+        )
+        image_paths.append(str(dst.resolve()))
+
+    rng = np.random.default_rng(42)
+    rng.shuffle(image_paths)
+    n_val = max(1, int(0.2 * len(image_paths))) if len(image_paths) > 1 else 0
+    (out_dir / "train.txt").write_text(
+        "\n".join(image_paths[n_val:]) + "\n"
+    )
+    (out_dir / "val.txt").write_text(
+        "\n".join(image_paths[:n_val] or image_paths[-1:]) + "\n"
+    )
+    yaml_path = _write_data_yaml(out_dir)
+
+    print(f"Pseudo-box images : {len(image_paths)} (skipped {skipped})")
+    print(f"Label files       : {len(list(label_out.glob('*.txt')))}")
+    print(f"data.yaml         : {yaml_path}")
+    print("Note: boxes are landmark-derived pseudo-labels, not human boxes.")
+    return {
+        "images": len(image_paths),
+        "labels": len(list(label_out.glob("*.txt"))),
+        "skipped": skipped,
+        "data_yaml": str(yaml_path),
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--images_dir")
     ap.add_argument("--masks_dir")
     ap.add_argument("--out_dir", default="dataset/yolo")
+    ap.add_argument("--from_landmarks", action="store_true",
+                    help="Derive pseudo-boxes from coords_pretrain.csv "
+                         "(no SPIDER masks needed).")
+    ap.add_argument("--csv", default=None,
+                    help="Landmark CSV for --from_landmarks.")
     ap.add_argument("--self-test", action="store_true")
     args = ap.parse_args()
 
     if args.self_test:
         _self_test(Path(args.out_dir))
+        return
+
+    if args.from_landmarks:
+        prepare_from_landmarks(Path(args.out_dir), args.csv)
         return
 
     _require_simpleitk()
@@ -179,6 +299,7 @@ def main() -> None:
     print(f"JPGs (YOLO images) : {len(list(image_out.glob('*.jpg')))}")
     print(f"Label files        : {len(list(label_out.glob('*.txt')))}")
     print(f"train.txt/val.txt  : {len(splits) - n_val} / {n_val}")
+    print(f"data.yaml          : {_write_data_yaml(out_dir)}")
     if skips:
         print("Skips:", skips)
     if ok == 0:

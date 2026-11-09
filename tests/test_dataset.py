@@ -2,6 +2,7 @@
 
 import numpy as np
 import torch
+from PIL import Image
 
 from dataset import _maybe_flip_augment
 
@@ -38,3 +39,20 @@ def test_no_flip_when_probability_zero():
     )
     assert torch.equal(out_img, img)
     assert torch.equal(out_coords, coords)
+
+
+def test_default_transform_tracks_runtime_config_image_size(monkeypatch):
+    """The dataset must preprocess at the *runtime* IMAGE_SIZE.
+
+    Regression test: importing the constant directly meant
+    ``train.py --image-size N`` (and checkpoint meta applied by
+    ``utils.load_model``) did not reach the data pipeline, so training and
+    inference silently used different scales.
+    """
+    import config
+    from dataset import SpineDataset
+
+    monkeypatch.setattr(config, "IMAGE_SIZE", 96)
+    dataset = SpineDataset()
+    out = dataset.transform(Image.new("RGB", (200, 300), color=(128, 128, 128)))
+    assert out.shape[-2:] == (96, 96)

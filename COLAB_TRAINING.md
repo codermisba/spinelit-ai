@@ -17,6 +17,26 @@ only gives the pipeline its **eyes**.
 3. Make sure your dataset is in Drive (default: `MyDrive/dataset/`).
 4. Run the cells top-to-bottom.
 
+## CPU-only profile (8 GB RAM, no GPU)
+
+The same `train.py` runs on CPU. The checkpoint in this working copy
+(`checkpoints/best_model.pth`) was produced with:
+
+```powershell
+& .\.venv\Scripts\python.exe train.py --epochs 18 --image-size 256 `
+    --batch-size 8 --model convnext_femto --lr 2e-4
+& .\.venv\Scripts\python.exe evaluate.py --checkpoint checkpoints/best_model.pth
+```
+
+It reaches **2.35 px mean error / 97.9% PCK@10** on the validation split (see
+the evaluation table). `--image-size 160` is ~2.5x faster and is honoured
+end-to-end; the checkpoint stores its own `image_size` / `model_name` /
+`softargmax_temperature`, so evaluation, Grad-CAM and the API automatically
+reproduce the training-time preprocessing.
+
+`convnext_femto` @256px is roughly 3–4 s/batch on 2 threads; `convnext_tiny`
+@256px is much slower on CPU and is best left to Colab.
+
 ## What each notebook section does
 
 | Section | What it does |
@@ -24,14 +44,30 @@ only gives the pipeline its **eyes**.
 | 0–4      | Set repo URL, check GPU, mount Drive, clone repo, install deps |
 | 5–6      | Load dataset from Drive (folder or `dataset.zip`), sanity checks |
 | 7        | Run `prepare_spider.py` on SPIDER to build coords + `ddd_labels.csv` |
-| 8        | Switch config to GPU values (`IMAGE_SIZE=512`, `BATCH_SIZE=32`) |
-| 9–10     | **Train** (`python train.py --epochs 60`) and evaluate |
-| 11       | (Optional) fit **calibrated probabilities** (`train_calibrator.py`) |
+| 8        | Switch config to GPU values (`IMAGE_SIZE=512`, `BATCH_SIZE=32`, `convnext_tiny`) |
+| 9–10     | **Train** (`python train.py --model convnext_tiny --epochs 60 --image-size 256 --batch-size 32`) and evaluate |
+| 11       | (Optional) fit **calibrated probabilities** (`train_calibrator.py`; skips without a trained DDD head) |
 | 12       | **Test the trained model through the agentic CLI** (`cli_pipeline.py`) |
 | 13       | (Optional) launch the Gradio agentic UI with a public `--share` link |
 | 14       | **Save checkpoints to Google Drive** (survives runtime reset) |
 | 15       | Download `best_model.pth` / `calibration.pkl` to your PC |
 | 16       | Restore checkpoints from Drive later |
+
+## Optional segmentation / YOLO heads
+
+```bash
+# standalone U-Net on a folder or nnU-Net raw layout
+python train_segmentation.py --data_dir /path/to/masks --epochs 40
+
+# YOLO from landmark-derived pseudo-boxes (no extra annotation needed)
+python yolo_prep.py --from_landmarks
+python yolo_train.py --epochs 60
+```
+
+These write `checkpoints/segmentation.pth` and `checkpoints/yolo_best.pt`.
+When either file is absent the API reports that task as unavailable instead of
+inventing masks/boxes; detection falls back to landmark-derived blocks and the
+response field `detection_source` says which source was used.
 
 ## Save the model for later use
 
@@ -53,10 +89,17 @@ Cell 14 copies to `MyDrive/spine-checkpoints/`:
    ```
 3. Test:
    ```powershell
+   .venv\Scripts\python.exe evaluate.py --checkpoint checkpoints\best_model.pth
+   .venv\Scripts\python.exe preview_predictions.py --num 4
+   .venv\Scripts\python.exe gradcam_demo.py --image "dataset/data/processed_spider_jpgs/case_midsag.jpg"
    .venv\Scripts\python.exe cli_pipeline.py --image "dataset/data/processed_spider_jpgs/case_midsag.jpg" --age 58 --sex female --pain-scale 6 --modality mri --pain-years 4 --start-year 2022 --symptoms "low back pain and leg numbness" --pretty
    .venv\Scripts\python.exe app.py      # local Gradio UI
-   .venv\Scripts\python.exe evaluate.py # metrics on the validation split
+   .venv\Scripts\uvicorn.exe api_server:app --port 8000   # REST API + /ui frontend
    ```
+   `preview_predictions.py` writes side-by-side predicted-vs-ground-truth
+   images to `outputs/predictions/` for visual QA. `gradcam_demo.py` refuses
+   to explain an untrained DDD head (use `--allow-untrained` only for an
+   architecture demo).
 
 ## Label file formats (produced by the SPIDER prep script)
 
@@ -88,8 +131,19 @@ case_midsag.jpg,L3/L4,3
 ```
 
 These labels both train the multi-class DDD Pfirrmann head **and** let
-`train_calibrator.py` fit true calibrated probabilities. Without them, the
-pipeline uses a documented deterministic fallback calibration.
+`train_calibrator.py` fit true calibrated probabilities. Without
+`ddd_labels.csv` the DDD head is left untrained: the API returns
+`ddd_available=false`, calibration is skipped, and no random grades are shown.
+
+## Localization metric
+
+`train.py`/`evaluate.py` report **PCK@5% / PCK@10%** (fraction of landmarks
+within 5% / 10% of the image size) plus per-point pixel error. The checkpoint
+in this working copy (femto, 256 px) scores **2.35 px mean error, 97.16%
+PCK@5 and 97.93% PCK@10** on 1690 visible validation points. The soft-argmax
+temperature in `config.py` is what makes those coordinates come from the
+heatmap peak rather than the image centre. Run `preview_predictions.py` to
+see the predicted blocks next to ground truth.
 
 ## Old single-image CLI
 
