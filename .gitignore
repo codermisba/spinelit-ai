@@ -20,10 +20,12 @@ dataset/coords_vertebrae.csv
 dataset/coords_rsna_improved.csv
 dataset/ddd_labels.csv
 dataset/longitudinal_records.csv
+dataset/segmentation/
 
 # ALL trained model weights stay out of Git...
 checkpoints/*.pth
 checkpoints/*.pt
+checkpoints/*.pkl
 # ...except the small fp16 inference artifact (<100 MB GitHub limit),
 # exported with: python export_release.py
 !checkpoints/release_model.pth

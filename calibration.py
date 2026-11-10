@@ -8,10 +8,14 @@ disease — the accuracy guarantee the pipeline advertises.
 
 Two modes
 ---------
-1. Fitted calibrators (best). On Colab, run `train_calibrator.py` with
-   labelled Pfirrmann (DDD) data. This fits an isotonic
-   regression (scikit-learn) mapping raw confidence -> observed
-   probability, and saves the artifact to CALIB_ARTIFACT.
+1. Fitted calibrators (best). Run `train_calibrator.py` after the DDD head is
+   trained. This fits an isotonic regression (scikit-learn) mapping the
+   model's raw P(Pfirrmann >= 2) to the observed frequency of degeneration,
+   and saves the artifact to CALIB_ARTIFACT. The fit is scored on held-out
+   cases (Brier score / ECE) rather than on its own training rows. If the
+   fitted map does **not** beat the raw probability on held-out Brier, the
+   artifact stores an identity/passthrough flag instead of shipping a worse
+   correction.
 
 2. Deterministic fallback (no labels). A principled heuristic so the
    pipeline is fully self-contained on a fresh clone:
@@ -40,16 +44,20 @@ class _Calibrators:
 
     def __init__(self):
         self.ddd: Optional[Callable] = None       # raw_conf -> probability
+        self.identity: bool = False               # keep raw probability as-is
         self.source: str = "deterministic-fallback"
 
     def fit_ddd(self, raw_conf, y):
         from sklearn.isotonic import IsotonicRegression
         self.ddd = IsotonicRegression(out_of_bounds="clip")
         self.ddd.fit(np.asarray(raw_conf, dtype=float), np.asarray(y, dtype=float))
+        self.identity = False
 
     def apply_ddd(self, pfirrmann_grade, raw_conf) -> tuple[str, float]:
         """Return (severity label, calibrated probability)."""
         severity, fallback_prob = _fallback_ddd(pfirrmann_grade, raw_conf)
+        if self.identity:
+            return severity, float(np.clip(raw_conf, 0.0, 1.0))
         if self.ddd is not None:
             prob = float(np.clip(self.ddd.predict([float(raw_conf)])[0], 0.0, 1.0))
             return severity, prob
@@ -75,6 +83,7 @@ def _load_or_default() -> _Calibrators:
             with open(path, "rb") as fh:
                 state = pickle.load(fh)
             c.ddd = state.get("ddd")
+            c.identity = bool(state.get("identity", False))
             c.source = state.get("source", "fitted")
         except Exception:  # noqa: BLE001 - corrupt artifact -> default
             c = _Calibrators()

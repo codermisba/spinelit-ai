@@ -502,6 +502,7 @@ class Trainer:
                 "fpn_dim": _cfg.FPN_DIM,
                 "heatmap_stride": _cfg.HEATMAP_STRIDE,
                 "softargmax_temperature": _cfg.SOFTARGMAX_TEMPERATURE,
+                "disc_pool_sigma_fraction": _cfg.DISC_POOL_SIGMA_FRACTION,
                 "num_keypoints": NUM_KEYPOINTS,
                 "num_discs": NUM_DISCS,
                 "num_pfrrmann_classes": NUM_PFRRMANN_CLASSES,

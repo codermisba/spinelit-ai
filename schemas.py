@@ -68,7 +68,7 @@ class LevelFinding(BaseModel):
     severity: str = ""                        # Normal/Mild/Moderate/Severe
     class_probabilities: list[float] = Field(default_factory=list)  # 5 softmax probs
     raw_confidence: float = 0.0               # max class probability 0-1
-    calibrated_probability: float = 0.0       # calibrated P(predicted grade) 0-1
+    calibrated_probability: float = 0.0       # calibrated P(Pfirrmann >= 2)
     localization_quality: float = 0.0         # landmark quality 0-1
     evidence: str = ""                        # human-readable evidence for the finding
 
@@ -232,14 +232,19 @@ def build_evidence_card(
         g_grade = float(ddd_grade[i])
         g_prob_row = [float(p) for p in ddd_prob[i]]
         g_rc = float(ddd_conf[i])
-        g_sev, g_prob = calibrate_ddd(g_grade, g_rc) if calibrate else (
-            severity_grade(g_grade), g_rc
+        # Probability of *any* degeneration (Pfirrmann >= 2) is the model's
+        # probability mass on grades 2-5.  This is what the isotonic
+        # calibrator is fitted against (see train_calibrator.py), so the
+        # reported probability is a real P(DDD), not P(predicted grade).
+        p_ddd = float(min(1.0, max(0.0, sum(g_prob_row[1:]))))
+        g_sev, g_prob = calibrate_ddd(g_grade, p_ddd) if calibrate else (
+            severity_grade(g_grade), p_ddd
         )
         g_label = pfirrmann_label(g_grade)
         g_ev = (
             f"Model Pfirrmann grade {g_grade:.0f} ({g_label}, {g_sev}); "
             f"class probabilities {[round(p,2) for p in g_prob_row]}; "
-            f"calibrated probability {g_prob:.2f}; "
+            f"calibrated P(DDD) {g_prob:.2f}; "
             f"model confidence {g_rc:.2f}."
         )
         card.ddd.append(LevelFinding(

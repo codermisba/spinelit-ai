@@ -55,6 +55,35 @@ def tiny_model():
          _cfg.IMAGE_SIZE) = old
 
 
+def test_checkpoint_meta_restores_disc_pool_sigma():
+    """Inference must use the pooling radius the DDD head was trained with."""
+    from utils import _apply_checkpoint_meta
+
+    original = _cfg.DISC_POOL_SIGMA_FRACTION
+    try:
+        meta = _apply_checkpoint_meta({"disc_pool_sigma_fraction": 0.055})
+        assert meta["disc_pool_sigma_fraction"] == 0.055
+        assert _cfg.DISC_POOL_SIGMA_FRACTION == 0.055
+    finally:
+        _cfg.DISC_POOL_SIGMA_FRACTION = original
+
+
+def test_merge_tasks_keeps_localization_after_ddd_finetune():
+    """Merging a trained DDD head must not erase the localizer task flag."""
+    from finetune_ddd import merge_tasks
+
+    ckpt = {
+        "tasks": {"localization": True, "ddd": False, "seg": False},
+        "meta": {"tasks": {"localization": True, "ddd": False, "seg": False}},
+    }
+    tasks = merge_tasks(ckpt, ddd=True)
+    assert tasks == {"localization": True, "ddd": True, "seg": False}
+
+    # Even if the top-level block is missing, meta.tasks is honoured.
+    tasks = merge_tasks({"meta": {"tasks": {"localization": True}}})
+    assert tasks["localization"] is True and tasks["ddd"] is True
+
+
 def test_heatmap_model_shapes_and_ranges(tiny_model):
     x = torch.randn(2, 3, 64, 64)
     with torch.no_grad():
@@ -81,6 +110,41 @@ def test_disc_centers_argument_is_used(tiny_model):
         out = tiny_model(x, disc_centers=centers)
     assert out["ddd_logits"].shape == (1, NUM_DISCS, NUM_PFRRMANN_CLASSES)
     assert torch.isfinite(out["ddd_logits"]).all()
+
+
+def test_disc_patch_sampling_is_local_and_finite():
+    """Each patch must be a finite crop around its own disc centre."""
+    from model import (DISC_PATCH_RES, _DiscLocalizedHead)
+
+    image = torch.zeros(1, 3, 256, 256)
+    # Bright horizontal band at y = 0.3, another at y = 0.7 (0-1 coords).
+    image[:, :, 70:82, :] = 2.0
+    image[:, :, 172:184, :] = -2.0
+
+    centers = torch.tensor([[[0.5, 0.3], [0.5, 0.7]]])
+    patches = _DiscLocalizedHead._sample_patches(image, centers)
+    assert patches.shape == (2, 1, *DISC_PATCH_RES)
+    assert torch.isfinite(patches).all()
+
+    bright = patches[0].mean().item()
+    dark = patches[1].mean().item()
+    assert bright > 0.2 > dark, (bright, dark)
+
+    stats = _DiscLocalizedHead._patch_stats(patches)
+    assert stats.shape == (2, 8)
+    assert torch.isfinite(stats).all()
+
+
+def test_split_stems_is_deterministic_and_disjoint():
+    from train_segmentation import split_stems
+
+    stems = [f"case{i:03d}" for i in range(25)]
+    tr1, va1 = split_stems(stems, 0.2, 42)
+    tr2, va2 = split_stems(stems, 0.2, 42)
+    assert (tr1, va1) == (tr2, va2)
+    assert not set(tr1) & set(va1)
+    assert len(va1) == 5 and len(tr1) == 20
+    assert sorted(tr1 + va1) == sorted(stems)
 
 
 def test_heatmap_soft_argmax_follows_shifted_signal(tiny_model):
@@ -246,6 +310,44 @@ def test_landmark_boxes_cover_all_levels():
         assert x1 > x0 and y1 > y0
 
 
+def test_landmark_detections_carry_model_confidence():
+    """Landmark-derived boxes must expose the localizer's real confidence."""
+    from detector import landmark_detections
+
+    coords = _dummy_coords()
+    conf = np.linspace(0.91, 0.55, NUM_KEYPOINTS)
+    detections = landmark_detections(coords, 200, 300, confidence=conf)
+
+    assert len(detections) == NUM_KEYPOINTS
+    assert all(d["source"] == "landmark" for d in detections)
+    assert all(d["confidence"] is not None for d in detections)
+    np.testing.assert_allclose(
+        [d["confidence"] for d in detections], conf, atol=1e-6
+    )
+
+
+def test_segmentation_mask_does_not_replace_level_labelled_detections():
+    """Mask boxes are generic; keep the L1..L5 / L1/L2..L5/S1 landmark boxes."""
+    from detector import build_detections
+
+    coords = _dummy_coords()
+    conf = np.full(NUM_KEYPOINTS, 0.8)
+    mask = np.zeros((300, 200), dtype=np.uint8)
+    mask[60:90, 40:80] = 1
+    mask[100:115, 45:75] = 2
+
+    detections, source = build_detections(
+        coords, 200, 300, segmentation_mask=mask,
+        landmark_confidence=conf,
+    )
+
+    assert source == "landmark"
+    labels = {d["label"] for d in detections}
+    assert set(_cfg.VERTEBRAE).issubset(labels)
+    assert set(DISC_LEVELS).issubset(labels)
+    assert all(d["confidence"] is not None for d in detections)
+
+
 def test_render_analysis_composes_without_error():
     image = Image.new("RGB", (120, 180), (25, 25, 25))
     coords = _dummy_coords()
@@ -311,6 +413,23 @@ def test_evidence_card_reports_ddd_when_available():
     assert card.ddd_available is True
     assert len(card.ddd) == len(DISC_LEVELS)
     assert all(f.pfirrmann_grade == 3 for f in card.ddd)
+
+
+def test_evidence_card_probability_is_p_ddd_not_max_confidence():
+    """calibrated_probability must be P(grade>=2), not the max class prob."""
+    from schemas import build_evidence_card
+
+    args = _card_args()
+    prob = np.zeros((NUM_DISCS, NUM_PFRRMANN_CLASSES), dtype=np.float32)
+    prob[:, 0] = 0.9     # grade 1 (normal) 90%
+    prob[:, 1] = 0.1     # grade 2 (degenerated) 10%
+    args["ddd_prob"] = prob
+    args["ddd_conf"] = np.full(NUM_DISCS, 0.9)
+
+    card = build_evidence_card(**args, ddd_available=True, calibrate=False)
+    for finding in card.ddd:
+        assert abs(finding.calibrated_probability - 0.10) < 1e-6
+        assert abs(finding.raw_confidence - 0.90) < 1e-6
 
 
 # ----------------------------------------------------------------------
@@ -382,6 +501,7 @@ def test_vision_engine_end_to_end_without_ddd(tiny_checkpoint):
     n_landmarks = len(_cfg.VERTEBRAE) + len(DISC_LEVELS)
     assert len(result["detections"]) == n_landmarks
     assert all(d["source"] == "landmark" for d in result["detections"])
+    assert all(d["confidence"] is not None for d in result["detections"])
 
     assert result["segmentation"]["available"] is False
     assert result["gradcam"] is None
@@ -405,6 +525,49 @@ def test_vision_engine_reports_missing_checkpoint(tmp_path):
     assert result["detection_source"] == "none"
     assert result["detections"] == []
     assert result["card"].image_processed is False
+
+
+def _strip_disc_head(path):
+    payload = torch.load(path, map_location="cpu", weights_only=False)
+    payload["model_state_dict"] = {
+        key: value for key, value in payload["model_state_dict"].items()
+        if not key.startswith("disc_head.")
+    }
+    torch.save(payload, path)
+    return path
+
+
+def test_load_model_refuses_trained_head_with_wrong_architecture(
+        tmp_path, monkeypatch):
+    """A checkpoint that claims DDD must not load a partially-random head."""
+    from utils import load_model
+
+    monkeypatch.setattr(_cfg, "MODEL_NAME", "convnext_femto")
+    monkeypatch.setattr(_cfg, "PRETRAINED", False)
+    monkeypatch.setattr(_cfg, "FPN_DIM", 64)
+    path = _write_tiny_checkpoint(tmp_path / "half_head.pth",
+                                  tasks={"ddd": True, "seg": False})
+    _strip_disc_head(path)
+
+    with pytest.raises(RuntimeError, match="trained DDD head"):
+        load_model(str(path))
+
+
+def test_load_model_allows_random_head_for_localizer_checkpoint(
+        tmp_path, monkeypatch):
+    """An honest localization-only checkpoint still loads (head untrained)."""
+    from utils import load_model
+
+    monkeypatch.setattr(_cfg, "MODEL_NAME", "convnext_femto")
+    monkeypatch.setattr(_cfg, "PRETRAINED", False)
+    monkeypatch.setattr(_cfg, "FPN_DIM", 64)
+    path = _write_tiny_checkpoint(tmp_path / "no_head.pth",
+                                  tasks={"ddd": False, "seg": False})
+    _strip_disc_head(path)
+
+    model, _device, _ckpt, meta = load_model(str(path))
+    assert meta["tasks"]["ddd"] is False
+    assert model is not None
 
 
 # ----------------------------------------------------------------------

@@ -16,6 +16,7 @@ Usage
 -----
     python publish_model.py --repo acme/spine-severity
     python publish_model.py --repo acme/spine-severity --with-calibration
+    python publish_model.py --repo acme/spine-severity --with-segmentation
     python publish_model.py --repo acme/spine-severity --rev v2
 
 Uploads overwrite the same filename on the Hub by default; keep a distinct
@@ -27,7 +28,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from config import BEST_MODEL, CALIB_ARTIFACT, RELEASE_MODEL
+from config import (BEST_MODEL, CALIB_ARTIFACT, RELEASE_MODEL,
+                    SEG_CHECKPOINT)
 
 
 def upload(repo_id: str, local_path: Path, filename: str,
@@ -60,6 +62,9 @@ def main() -> None:
                         help="target revision (default: main; pass v2/v3 for pinned deploys)")
     parser.add_argument("--with-calibration", action="store_true",
                         help="also upload calibration.pkl if it exists")
+    parser.add_argument("--with-segmentation", action="store_true",
+                        help="also upload checkpoints/segmentation.pth so the "
+                             "hosted API serves real masks")
     args = parser.parse_args()
 
     source = Path(args.checkpoint)
@@ -76,6 +81,13 @@ def main() -> None:
     files = [(source, args.filename or source.name)]
     if args.with_calibration and CALIB_ARTIFACT.exists():
         files.append((CALIB_ARTIFACT, CALIB_ARTIFACT.name))
+    if args.with_segmentation:
+        seg = Path(SEG_CHECKPOINT)
+        if not seg.exists():
+            print(f"--with-segmentation: {seg} not found; skipping.",
+                  file=sys.stderr)
+        else:
+            files.append((seg, seg.name))
 
     for path, remote_name in files:
         try:

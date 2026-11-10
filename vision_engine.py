@@ -263,6 +263,7 @@ class VisionEngine:
             detector=self._detector,
             image=image,
             segmentation_mask=seg_mask,
+            landmark_confidence=conf,
         )
 
         # ---- DDD card (honest gating) ----------------------------------

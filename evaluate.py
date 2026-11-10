@@ -100,12 +100,10 @@ def build_val_indices(dataset: SpineDataset) -> np.ndarray:
 
 @torch.no_grad()
 def compute_metrics(model, val_loader, max_samples=None,
-                    pixel_scale: int | None = None,
-                    ddd_available: bool = False) -> dict:
+                    pixel_scale: int | None = None) -> dict:
 
     pixel_scale = int(pixel_scale or _cfg.IMAGE_SIZE)
     coord_errors, confs, peaks = [], [], []
-    ddd_acc, ddd_mae = [], []
 
     model.eval()
 
@@ -128,15 +126,6 @@ def compute_metrics(model, val_loader, max_samples=None,
         confs.append(outputs["localization_conf"].float().cpu().numpy())
         if "heatmap_peak" in outputs:
             peaks.append(outputs["heatmap_peak"].float().cpu().numpy())
-
-        if ddd_available and batch["ddd_mask"].sum() > 0:
-            mask = batch["ddd_mask"].bool()
-            ddd_class = batch["ddd_class"].long()
-            pred_class = outputs["ddd_logits"].argmax(dim=-1).cpu().long()
-            pred_grade = (pred_class + 1).float()
-            tgt_grade = (ddd_class + 1).float()
-            ddd_acc.append((pred_class == ddd_class)[mask].float().numpy())
-            ddd_mae.append((pred_grade - tgt_grade).abs()[mask].numpy())
 
         if max_samples and len(coord_errors) * BATCH_SIZE >= max_samples:
             break
@@ -169,16 +158,77 @@ def compute_metrics(model, val_loader, max_samples=None,
     if peaks:
         results["heatmap_peak_mean"] = float(np.concatenate(peaks).mean())
 
-    results["ddd_accuracy"] = (
-        float(np.concatenate(ddd_acc).mean())
-        if ddd_acc else None
-    )
-    results["ddd_mae_grade"] = (
-        float(np.concatenate(ddd_mae).mean())
-        if ddd_mae else None
-    )
+    results["ddd_accuracy"] = None
+    results["ddd_within_one"] = None
+    results["ddd_mae_grade"] = None
+    results["ddd_cases"] = 0
+    results["ddd_discs"] = 0
 
     return results
+
+
+def build_ddd_val_indices(dataset) -> list[int]:
+    """Rebuild the DDD trainer's held-out split exactly.
+
+    ``finetune_ddd.py`` splits the *labelled* cases 80/20 with a stratified
+    shuffle (seed 42).  Evaluating the DDD head on any other subset would
+    include cases it was trained on and inflate accuracy, so this must match
+    that split rather than the localizer's 15% image split.
+    """
+    if getattr(dataset, "ddd_labels", None) is None:
+        return []
+    from sklearn.model_selection import StratifiedShuffleSplit
+
+    labelled = set(dataset.ddd_labels["filename"].astype(str))
+    indices = [i for i, name in enumerate(dataset.image_names)
+               if str(name) in labelled]
+    labels = []
+    for i in indices:
+        rows = dataset.ddd_labels[
+            dataset.ddd_labels["filename"].astype(str)
+            == str(dataset.image_names[i])]
+        labels.append(str(int(round(float(rows["pfirrmann_grade"].median())))))
+    if len(indices) < 20:
+        return []
+    splitter = StratifiedShuffleSplit(
+        n_splits=1, test_size=0.20, random_state=42)
+    _, val_pos = next(splitter.split(indices, labels))
+    return [indices[p] for p in val_pos]
+
+
+@torch.no_grad()
+def compute_ddd_metrics(model, dataset, indices: list[int],
+                        batch_size: int = 8) -> dict:
+    """DDD accuracy on the held-out labelled cases only."""
+    from torch.utils.data import Subset
+
+    model.eval()
+    loader = DataLoader(Subset(dataset, indices), batch_size=batch_size,
+                        shuffle=False)
+    exact = within = 0
+    abs_err = 0.0
+    discs = 0
+    for batch in loader:
+        images = batch["image"].to(DEVICE, non_blocking=True)
+        outputs = model(images)
+        pred = outputs["ddd_logits"].argmax(dim=-1).cpu().long()
+        mask = batch["ddd_mask"].bool()
+        target = batch["ddd_class"].long()
+        diff = (pred[mask] - target[mask]).abs()
+        exact += int((diff == 0).sum())
+        within += int((diff <= 1).sum())
+        abs_err += float(diff.sum())
+        discs += int(mask.sum())
+    if discs == 0:
+        return {"ddd_accuracy": None, "ddd_within_one": None,
+                "ddd_mae_grade": None, "ddd_cases": 0, "ddd_discs": 0}
+    return {
+        "ddd_accuracy": exact / discs,
+        "ddd_within_one": within / discs,
+        "ddd_mae_grade": abs_err / discs,
+        "ddd_cases": len(indices),
+        "ddd_discs": discs,
+    }
 
 
 def print_summary(results: dict) -> None:
@@ -211,8 +261,12 @@ def print_summary(results: dict) -> None:
         print(f"Mean heatmap peak : {results['heatmap_peak_mean']:.3f}")
 
     if results["ddd_accuracy"] is not None:
+        print(f"DDD held-out cases     : {results['ddd_cases']} "
+              f"({results['ddd_discs']} discs, trainer's seed-42 split)")
         print(f"DDD Pfirrmann Accuracy : "
               f"{results['ddd_accuracy'] * 100:.2f} %")
+        print(f"DDD Within-One-Grade    : "
+              f"{results['ddd_within_one'] * 100:.2f} %")
         print(f"DDD Grade MAE          : "
               f"{results['ddd_mae_grade']:.3f} Pfirrmann grades")
     else:
@@ -257,8 +311,12 @@ def main() -> None:
     results = compute_metrics(
         model, val_loader, args.max_samples,
         pixel_scale=image_size,
-        ddd_available=bool(tasks.get("ddd", False)),
     )
+
+    if tasks.get("ddd", False):
+        ddd_indices = build_ddd_val_indices(dataset)
+        if ddd_indices:
+            results.update(compute_ddd_metrics(model, dataset, ddd_indices))
 
     print_summary(results)
 

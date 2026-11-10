@@ -137,7 +137,19 @@ validation split (1690 visible points):
 | PCK@5% (≤ 5% image size) | **97.16%** |
 | PCK@10% (≤ 10% image size) | **97.93%** |
 | Mean landmark confidence | 0.888 |
-| DDD / segmentation | unavailable (no labels / no masks) |
+| DDD exact grade accuracy | **32.9%** teacher-forced / **34.3%** with predicted centres |
+| DDD within-one-grade | **79.0%** / **80.0%** |
+| DDD grade MAE | **0.96** / **0.92** Pfirrmann grades |
+| Segmentation (foreground Dice) | vertebra **0.58**, disc **0.37**, canal **0.51**; mean **0.486** |
+
+DDD numbers are on the 42 held-out SPIDER cases (210 discs). The majority
+class scores ≈ 27.5%, so exact-grade accuracy is only modestly above chance:
+one labelled sagittal slice per case is genuinely weak evidence for five-level
+Pfirrmann grading. Within-one-grade agreement is the more stable/useful
+number, and the API also exposes all five class probabilities. This is a
+research prototype, **not** a clinical grading tool. Segmentation is the
+standalone U-Net (37 held-out cases); its checkpoint metadata stores the same
+hard-Dice metric, reproducible with `evaluate_segmentation.py`.
 
 Inspect it directly:
 
@@ -190,19 +202,31 @@ preprocess with exactly the training-time configuration.
 
 ### Optional heads
 
-- **Segmentation (U-Net)** — `python train_segmentation.py` on a folder or
-  nnU-Net raw layout; inference uses `checkpoints/segmentation.pth`.
-  Without masks the API reports segmentation as *unavailable*.
+- **DDD / Pfirrmann head** — `python finetune_ddd.py` trains it on cached
+  frozen-backbone features whenever `dataset/ddd_labels.csv` exists (fast even
+  on CPU) and merges the best head into `checkpoints/best_model.pth` with
+  `tasks.ddd=true`. Without labels the API reports `ddd_available=false` and
+  shows no grades rather than random ones. `evaluate.py` reports exact
+  accuracy, within-one-grade agreement and MAE.
+- **Segmentation (U-Net)** — `python prepare_segmentation_pairs.py` builds
+  aligned image/mask pairs from SPIDER, `python train_segmentation.py
+  --images dataset/segmentation/images --masks dataset/segmentation/masks`
+  trains the standalone U-Net, and `python evaluate_segmentation.py`
+  reproduces the held-out per-class Dice/IoU with overlay PNGs. Inference uses
+  `checkpoints/segmentation.pth` (or downloads it from the Hub). Without masks
+  the API reports segmentation as *unavailable*.
 - **YOLO detector** — `python yolo_prep.py --from_landmarks` builds
   pseudo-boxes from the landmark CSV, then `python yolo_train.py` writes
   `checkpoints/yolo_best.pt`. Detection priority is
-  YOLO → segmentation boxes → landmark-derived blocks, always labelled with
-  its source.
-- **DDD / Pfirrmann head** — only trained when `dataset/ddd_labels.csv`
-  exists. Without labels the API reports `ddd_available=false` and shows no
-  grades rather than random ones.
-- **Calibration** — `python train_calibrator.py` fits isotonic calibration
-  from labelled data (skips cleanly when no trained DDD head exists).
+  YOLO → level-labelled landmark boxes → segmentation boxes, always labelled
+  with its source.
+- **Calibration** — `python train_calibrator.py` fits isotonic calibration for
+  **P(Pfirrmann ≥ 2)** on 80% of labelled cases and reports Brier/ECE on the
+  held-out 20% (skips cleanly when no trained DDD head exists). On the current
+  checkpoint the raw probability is already well calibrated (held-out Brier
+  0.111, ECE 0.047) and the isotonic fit was slightly worse (0.119 / 0.070),
+  so the artifact keeps the raw probability via a passthrough flag instead of
+  shipping a worse correction.
 
 Without a checkpoint the pipeline still runs in a **degraded mode**: it shows
 the LLM reasoning/report skeleton and clear model-status, but vision tables
@@ -244,9 +268,13 @@ Git and Docker). Publish it once, then every host downloads the active
 version at startup:
 
 ```bash
-python publish_model.py --repo you/spine-severity
+python publish_model.py --repo you/spine-severity \
+    --with-calibration --with-segmentation
 # host env: MODEL_ID=you/spine-severity
 ```
+
+Both `best_model.pth` and `segmentation.pth` are downloaded from that repo at
+startup, so masks and grades work with no files on the host.
 
 See [`docs/DEPLOY_API.md`](docs/DEPLOY_API.md) for the full step-by-step.
 
@@ -276,7 +304,7 @@ is applied at load time.
 
 - Full deployment guide → [`docs/DEPLOY_API.md`](docs/DEPLOY_API.md)
 - Ready-to-use frontend page → [`examples/frontend_demo.html`](examples/frontend_demo.html)
-- Publish retrained weights → `python publish_model.py --repo you/spine-severity --with-calibration`
+- Publish retrained weights → `python publish_model.py --repo you/spine-severity --with-calibration --with-segmentation`
 
 Unavailable tasks are reported honestly: `/api/analyze` returns
 `ddd_available=false` when no Pfirrmann labels were used, segmentation
@@ -384,11 +412,18 @@ as such in the legend.
   temperature (`SOFTARGMAX_TEMPERATURE`) so the expectation reads the actual
   peak instead of collapsing to the image centre.  Per-point confidence is a
   learned head supervised by the model's own localisation error.
-- **DDD head** — Gaussian-attention pooling around each disc centre →
-  per-level Pfirrmann grade (5-class softmax).  Only trained when
-  `dataset/ddd_labels.csv` exists; otherwise reported as unavailable.
-- **Segmentation head / U-Net** — optional; standalone `segmentation.py`
-  U-Net with Dice+CE training (`train_segmentation.py`).  No masks ⇒ no
+- **DDD head** — per disc: Gaussian-attention pooling around the localized
+  centre (σ = 4% of the fused map, i.e. roughly one disc, stored in checkpoint
+  metadata) **plus** a small CNN over the raw 32×64 image patch, brightness /
+  homogeneity statistics, disc spacing and a learned per-level embedding →
+  per-level Pfirrmann grade (5-class softmax).  The raw patch matters because
+  the fused feature map is trained for landmarks, not disc degeneration.  Only
+  trained when `dataset/ddd_labels.csv` exists; otherwise reported as
+  unavailable.
+- **Segmentation head / U-Net** — optional; a standalone `segmentation.py`
+  U-Net (4 classes: background, vertebra, disc, spinal canal) trained with
+  Dice+CE (`train_segmentation.py`), loaded from `checkpoints/segmentation.pth`
+  or downloaded as `segmentation.pth` from the model Hub repo.  No masks ⇒ no
   fabricated masks.
 - **Detector** — optional Ultralytics YOLO (`detector.py`, `yolo_train.py`)
   with landmark/segmentation fallbacks; every box is labelled with its source.
@@ -419,7 +454,13 @@ training exactly.
       2.35 px mean error / 97.9% PCK@10 on the validation split)
 - [x] Test suite for the §28 decision-support acceptance scenarios
 - [x] Hosted API (`/api/analyze`, `/ui`, `/docs`) with honest task gating
-- [ ] Train the DDD/Pfirrmann head (needs `dataset/ddd_labels.csv`)
-- [ ] Train segmentation/YOLO on real masks (needs SPIDER masks)
-- [ ] Fit calibration from labels; report calibration curves / AUROC
+- [x] DDD/Pfirrmann head trained on SPIDER labels (32.9% exact / 79.0%
+      within one grade / 0.96 MAE on held-out discs; see caveat above)
+- [x] Standalone U-Net segmentation trained on aligned SPIDER masks
+      (mean foreground Dice 0.486; per-class table above)
+- [x] Calibration measured on held-out cases (raw P(DDD) Brier 0.111 /
+      ECE 0.047; isotonic fit was worse, so the raw probability is served
+      via a passthrough artifact)
+- [ ] Train the YOLO detector (segmentation + landmark boxes already cover
+      detection; YOLO weights are optional)
 - [ ] Extend to additional spine diseases / 3D (MRI) inputs

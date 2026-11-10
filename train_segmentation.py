@@ -244,6 +244,16 @@ def _resize_pair(image: Image.Image, mask: Image.Image, size: int):
 # Loss / metrics
 # ----------------------------------------------------------------------
 
+def split_stems(stems: list[str], val_fraction: float = 0.2,
+                seed: int = 42) -> tuple[list[str], list[str]]:
+    """Deterministic case-level train/val split (shared with evaluation)."""
+    rng = np.random.default_rng(seed)
+    order = list(stems)
+    rng.shuffle(order)
+    n_val = max(1, int(round(val_fraction * len(order))))
+    return order[n_val:], order[:n_val]
+
+
 def dice_loss(logits: torch.Tensor, target: torch.Tensor,
               num_classes: int) -> torch.Tensor:
     probs = torch.softmax(logits, dim=1)
@@ -259,21 +269,6 @@ def dice_loss(logits: torch.Tensor, target: torch.Tensor,
 
 def ce_loss(logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
     return F.cross_entropy(logits, target, label_smoothing=0.05)
-
-
-@torch.no_grad()
-def dice_per_class(logits: torch.Tensor, target: torch.Tensor,
-                   num_classes: int) -> np.ndarray:
-    pred = logits.argmax(dim=1)
-    scores = np.zeros(num_classes, dtype=np.float32)
-    for c in range(num_classes):
-        p = pred == c
-        t = target == c
-        denom = int(p.sum()) + int(t.sum())
-        scores[c] = 1.0 if denom == 0 else float(
-            (2 * int((p & t).sum())) / denom
-        )
-    return scores
 
 
 # ----------------------------------------------------------------------
@@ -346,16 +341,11 @@ class SegTrainer:
             )
 
         stems = full.stems
-        rng = np.random.default_rng(42)
-        order = list(stems)
-        rng.shuffle(order)
-        n_val = max(1, int(round(0.2 * len(order))))
-        if len(order) < 4:
+        if len(stems) < 4:
             raise SystemExit(
-                f"Only {len(order)} cases; need at least 4 to split."
+                f"Only {len(stems)} cases; need at least 4 to split."
             )
-        val_stems = order[:n_val]
-        train_stems = order[n_val:]
+        train_stems, val_stems = split_stems(stems, 0.2, 42)
 
         if isinstance(full, NnUNet2DDataset):
             train = NnUNet2DDataset(Path(args.nnunet_dir), self.image_size,
@@ -404,7 +394,8 @@ class SegTrainer:
     def validate(self) -> tuple[float, np.ndarray]:
         self.model.eval()
         total, n = 0.0, 0
-        dice_sum = np.zeros(self.num_classes, dtype=np.float64)
+        inter = np.zeros(self.num_classes, dtype=np.float64)
+        denom = np.zeros(self.num_classes, dtype=np.float64)
         for images, masks in self.val_loader:
             images = images.to(self.device)
             masks = masks.to(self.device)
@@ -414,8 +405,17 @@ class SegTrainer:
             )
             total += loss.item()
             n += 1
-            dice_sum += dice_per_class(logits, masks, self.num_classes)
-        dice = dice_sum / max(n, 1)
+            # Hard (argmax) Dice accumulated over the whole validation set, not
+            # a per-batch average: this is exactly what evaluate_segmentation.py
+            # reports, so the checkpoint metadata and the reproduced number
+            # agree.
+            pred = logits.argmax(dim=1)
+            for cls in range(self.num_classes):
+                p = (pred == cls)
+                t = (masks == cls)
+                inter[cls] += float((p & t).sum().item())
+                denom[cls] += float(p.sum().item() + t.sum().item())
+        dice = np.where(denom > 0, 2.0 * inter / np.maximum(denom, 1e-9), 0.0)
         return total / max(n, 1), dice
 
     def save(self, epoch: int, val_loss: float, dice: np.ndarray) -> None:

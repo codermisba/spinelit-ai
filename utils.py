@@ -183,7 +183,44 @@ def load_model(
                 for k, v in state_dict.items()
             }
 
-    model.load_state_dict(state_dict)
+    try:
+        model.load_state_dict(state_dict)
+    except RuntimeError:
+        # The DDD head is retrained independently (finetune_ddd.py) and may
+        # legitimately gain parameters (e.g. the raw-image patch encoder).
+        # Allow ONLY disc_head differences; every other tensor must match
+        # exactly, so a genuinely incompatible checkpoint still fails loudly.
+        current = model.state_dict()
+        head_prefix = "disc_head."
+        incompatible = []
+        for key in set(current) | set(state_dict):
+            if key in current and key in state_dict:
+                if current[key].shape != state_dict[key].shape:
+                    incompatible.append(key)
+            else:
+                incompatible.append(key)
+        if any(not key.startswith(head_prefix) for key in incompatible):
+            raise
+        filtered = {
+            key: value for key, value in state_dict.items()
+            if key in current and current[key].shape == value.shape
+        }
+        dropped = [key for key in incompatible if key.startswith(head_prefix)]
+        if dropped and meta["tasks"]["ddd"]:
+            # The checkpoint claims a trained head but its tensors do not fit
+            # this architecture.  Loading would leave parts of the head
+            # randomly initialised, which would surface as fabricated grades.
+            raise RuntimeError(
+                f"{checkpoint_path} declares a trained DDD head but its "
+                f"disc_head weights do not match the current architecture "
+                f"({len(dropped)} mismatched tensors). Retrain it with "
+                f"finetune_ddd.py instead of loading stale weights."
+            ) from None
+        missing, unexpected = model.load_state_dict(filtered, strict=False)
+        remaining = [key for key in list(missing) + list(unexpected)
+                     if not key.startswith(head_prefix)]
+        if remaining:
+            raise
     model.eval()
 
     return model, device, checkpoint_path, meta
@@ -210,6 +247,7 @@ def _apply_checkpoint_meta(meta: dict) -> dict:
         "fpn_dim",
         "heatmap_stride",
         "softargmax_temperature",
+        "disc_pool_sigma_fraction",
         "use_imagenet_norm",
         "model_name",
     )
@@ -228,6 +266,9 @@ def _apply_checkpoint_meta(meta: dict) -> dict:
         _cfg.FPN_DIM = int(out["fpn_dim"])
     if "softargmax_temperature" in out:
         _cfg.SOFTARGMAX_TEMPERATURE = float(out["softargmax_temperature"])
+    if "disc_pool_sigma_fraction" in out:
+        _cfg.DISC_POOL_SIGMA_FRACTION = float(
+            out["disc_pool_sigma_fraction"])
     if "num_seg_classes" in out:
         _cfg.NUM_SEG_CLASSES = int(out["num_seg_classes"])
     if "use_imagenet_norm" in out:

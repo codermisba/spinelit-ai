@@ -53,11 +53,33 @@ reproduce the training-time preprocessing.
 | 15       | Download `best_model.pth` / `calibration.pkl` to your PC |
 | 16       | Restore checkpoints from Drive later |
 
-## Optional segmentation / YOLO heads
+## DDD head (Pfirrmann) — train separately from the localizer
+
+The localizer backbone is frozen once it is good; the DDD head is then trained
+on cached features (one forward pass per case), which is ~30–40 s/epoch on CPU
+instead of hours.
 
 ```bash
-# standalone U-Net on a folder or nnU-Net raw layout
-python train_segmentation.py --data_dir /path/to/masks --epochs 40
+# after prepare_spider.py produced dataset/ddd_labels.csv
+python finetune_ddd.py --epochs 250 --patience 40 --select-by loss
+```
+
+It merges the best head into `checkpoints/best_model.pth`, sets
+`tasks.ddd=true` in the checkpoint metadata and records the validation metrics
+(`ddd_finetune` in `meta`, including `best_epoch` and `val_within_one`).
+Selection is by validation cross-entropy by default (`--select-by loss`);
+`--select-by within_one` is available but noisy on ~210 validation discs.
+`evaluate.py --checkpoint checkpoints/best_model.pth` reproduces the
+teacher-forced metrics and reports within-one-grade agreement too.
+
+Optional segmentation / YOLO heads:
+
+```bash
+# standalone U-Net on an aligned image/mask folder (or --nnunet_dir)
+python prepare_segmentation_pairs.py        # build dataset/segmentation/
+python train_segmentation.py --images dataset/segmentation/images \
+    --masks dataset/segmentation/masks --epochs 40
+python evaluate_segmentation.py             # held-out Dice/IoU + overlays
 
 # YOLO from landmark-derived pseudo-boxes (no extra annotation needed)
 python yolo_prep.py --from_landmarks
@@ -67,7 +89,9 @@ python yolo_train.py --epochs 60
 These write `checkpoints/segmentation.pth` and `checkpoints/yolo_best.pt`.
 When either file is absent the API reports that task as unavailable instead of
 inventing masks/boxes; detection falls back to landmark-derived blocks and the
-response field `detection_source` says which source was used.
+response field `detection_source` says which source was used. The segmentation
+trainer and `evaluate_segmentation.py` share the same case-level 20% split
+(seed 42), so the reported Dice matches the training-time value.
 
 ## Save the model for later use
 
@@ -75,8 +99,19 @@ Cell 14 copies to `MyDrive/spine-checkpoints/`:
 
 - `best_model.pth` — the imaging model (all tasks the vision engine uses)
 - `last_model.pth` — resume point
+- `segmentation.pth` — standalone U-Net masks (optional)
 - `calibration.pkl` — fitted calibrated probabilities
 - `longitudinal_model.pth` — progression model (if you train `train_clinical.py`)
+
+Publish everything the hosted API needs in one command:
+
+```bash
+python publish_model.py --repo acme/spine-severity \
+    --with-calibration --with-segmentation
+```
+
+The API downloads `best_model.pth` and `segmentation.pth` from the Hub repo
+named by `MODEL_ID`; nothing has to be copied onto the host.
 
 ## Use the trained model back home (Windows)
 

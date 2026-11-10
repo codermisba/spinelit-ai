@@ -153,9 +153,13 @@ HEATMAP_SIGMA = 2.0          # gaussian target radius (feature-map pixels)
 # (validated: 5.5 px vs 32 px mean error at the same checkpoint).
 SOFTARGMAX_TEMPERATURE = 10.0
 # Gaussian pooling radius for the per-disc DDD classifier, as a fraction of
-# the fused feature map's size.  Small enough to pool around ONE disc, large
-# enough to include the whole endplate; ~12% ≈ 5 px at 40x40 (20 px at 160px).
-DISC_POOL_SIGMA_FRACTION = 0.12
+# the fused feature map's size.  It must match ONE disc, not a whole spinal
+# segment: at stride 4 / 256 px input the fused map is 64x64, so 0.04 is a
+# ~2.6 feature-px sigma (~10 image px) — about the height of a lumbar disc.
+# 0.12 (the previous value) pooled ~30 image px and mixed each disc with its
+# neighbouring vertebrae/endplates.  The value is stored in checkpoint
+# metadata so inference uses exactly what the head was trained with.
+DISC_POOL_SIGMA_FRACTION = 0.04
 NUM_SEG_CLASSES = 4          # background, vertebra, disc, spinal canal
 SEG_CLASS_NAMES = ["background", "vertebra", "disc", "spinal_canal"]
 SEG_CLASS_COLOURS = {

@@ -51,6 +51,22 @@ import timm
 import config as _cfg
 
 
+# Raw-disc-patch encoder geometry (shared by training and inference because
+# both build the head from this module).  The patch is defined in normalised
+# image coordinates around each disc centre: ~56x23 px at a 256 px input,
+# i.e. the nucleus/annulus and a little endplate, but not the neighbouring
+# vertebral bodies.
+DISC_PATCH_DIM = 48
+DISC_PATCH_HALF_W = 0.11     # half-width  (fraction of image width)
+DISC_PATCH_HALF_H = 0.045    # half-height (fraction of image height)
+DISC_PATCH_RES = (32, 64)    # sampled patch resolution (H, W)
+# Explicit brightness/homogeneity statistics appended to the learned patch
+# embedding: mean, std, 10/50/90th percentile, fraction above 0 / 0.5 / 1.0
+# (in ImageNet-normalised units).  These are the direct T2 cues behind the
+# Pfirrmann scale and are cheap to compute for 5 discs.
+DISC_PATCH_STATS = 8
+
+
 # ----------------------------------------------------------------------
 # Feature Pyramid Network
 # ----------------------------------------------------------------------
@@ -130,6 +146,38 @@ def _soft_argmax_2d(
     return coords, peak
 
 
+class _DiscPatchEncoder(nn.Module):
+    """Small CNN over a raw-image patch centred on each disc.
+
+    The fused FPN features are trained for *localization*.  Pfirrmann grading
+    is dominated by the T2 signal of the nucleus pulposus (brightness,
+    homogeneity) and disc height, which a localization feature map does not
+    have to preserve.  This encoder reads those cues directly from the input
+    image so the DDD head is not limited by the backbone's objective.
+    """
+
+    def __init__(self, out_dim: int):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(1, 16, 3, padding=1, bias=False),
+            nn.GroupNorm(4, 16),
+            nn.SiLU(inplace=True),
+            nn.MaxPool2d(2),
+            nn.Conv2d(16, 32, 3, padding=1, bias=False),
+            nn.GroupNorm(8, 32),
+            nn.SiLU(inplace=True),
+            nn.MaxPool2d(2),
+            nn.Conv2d(32, out_dim, 3, padding=1, bias=False),
+            nn.GroupNorm(8, out_dim),
+            nn.SiLU(inplace=True),
+            nn.AdaptiveAvgPool2d(1),
+        )
+
+    def forward(self, patches: torch.Tensor) -> torch.Tensor:
+        # patches: (B*D, 1, Ph, Pw) -> (B*D, out_dim)
+        return self.net(patches).flatten(1)
+
+
 class _DiscLocalizedHead(nn.Module):
     """
     Classify each disc from a Gaussian-attention-pooled feature patch.
@@ -141,19 +189,97 @@ class _DiscLocalizedHead(nn.Module):
     """
 
     def __init__(self, feature_dim: int, num_discs: int,
-                 num_classes: int, sigma_fraction: float = 0.55):
+                 num_classes: int, sigma_fraction: float = 0.55,
+                 patch_dim: int = DISC_PATCH_DIM):
         super().__init__()
         self.num_discs = int(num_discs)
         self.num_classes = int(num_classes)
         self.sigma_fraction = float(sigma_fraction)
+        self.patch_encoder = _DiscPatchEncoder(patch_dim)
+        # Learned per-level prior: Pfirrmann distributions differ by level
+        # (L1/L2 degenerates more than L5/S1), but the Gaussian-pooled feature
+        # carries no absolute position, so the head could not learn it.
+        self.level_embed = nn.Embedding(self.num_discs, 8)
+        # fused FPN feature + raw-patch embedding + brightness stats
+        # + 2 spacing/geometry scalars + level embedding + absolute y
+        head_in = int(feature_dim) + int(patch_dim) + DISC_PATCH_STATS + 2 + 8 + 1
         self.classifier = nn.Sequential(
             nn.Dropout(0.25),
-            nn.Linear(feature_dim, 256),
+            nn.Linear(head_in, 256),
             nn.GELU(),
             nn.Linear(256, self.num_classes),
         )
 
-    def forward(self, fmap: torch.Tensor, disc_centers: torch.Tensor):
+    @staticmethod
+    def _sample_patches(image: torch.Tensor,
+                        centers: torch.Tensor) -> torch.Tensor:
+        """Sample one normalised patch per disc centre from the input image.
+
+        ``centers`` are (B,D,2) in [0,1].  Returns (B*D,1,Ph,Pw).  Sampling
+        from the *input* (not the stride-4 feature map) preserves the fine
+        T2 intensity pattern the Pfirrmann grade depends on.
+        """
+        b, _, h, w = image.shape
+        d = centers.shape[1]
+        ph, pw = DISC_PATCH_RES
+        gray = image.mean(dim=1, keepdim=True)           # (B,1,H,W)
+
+        ys = torch.linspace(-1.0, 1.0, ph, device=image.device,
+                            dtype=image.dtype)
+        xs = torch.linspace(-1.0, 1.0, pw, device=image.device,
+                            dtype=image.dtype)
+        grid_y, grid_x = torch.meshgrid(ys, xs, indexing="ij")
+
+        cx = centers[..., 0].reshape(b, d, 1, 1)
+        cy = centers[..., 1].reshape(b, d, 1, 1)
+        # Offsets in normalised image units, then converted to grid_sample's
+        # [-1, 1] coordinate system.
+        gx = cx + grid_x.view(1, 1, ph, pw) * DISC_PATCH_HALF_W
+        gy = cy + grid_y.view(1, 1, ph, pw) * DISC_PATCH_HALF_H
+        grid = torch.stack([gx * 2.0 - 1.0, gy * 2.0 - 1.0], dim=-1)
+        grid = grid.reshape(b * d, ph, pw, 2)
+
+        gray = gray.unsqueeze(1).expand(b, d, 1, h, w).reshape(b * d, 1, h, w)
+        return F.grid_sample(gray, grid, mode="bilinear",
+                             padding_mode="border", align_corners=True)
+
+    @staticmethod
+    def _patch_stats(patches: torch.Tensor) -> torch.Tensor:
+        """Brightness/homogeneity statistics per patch -> (N, 8)."""
+        flat = patches.flatten(2)                     # (N, 1, Ph*Pw)
+        mean = flat.mean(dim=-1)                      # (N, 1)
+        std = flat.std(dim=-1, unbiased=False)        # (N, 1)
+        qs = torch.tensor([0.1, 0.5, 0.9], device=flat.device,
+                          dtype=flat.dtype)
+        quant = torch.quantile(flat, qs, dim=-1)      # (3, N, 1)
+        quant = quant.movedim(0, -1).reshape(flat.shape[0], -1)  # (N, 3)
+        bright = [(flat > t).to(flat.dtype).mean(dim=-1)
+                  for t in (0.0, 0.5, 1.0)]            # each (N, 1)
+        return torch.cat([mean, std, quant, *bright], dim=-1)
+
+    @staticmethod
+    def _spacing_features(centers: torch.Tensor) -> torch.Tensor:
+        """Relative disc spacing per level (disc narrowing is a DDD cue)."""
+        b, d, _ = centers.shape
+        if d < 2:
+            return centers.new_zeros(b, d, 2)
+        gaps = (centers[:, 1:, 1] - centers[:, :-1, 1]).abs()   # (B,D-1)
+        mean_gap = gaps.mean(dim=1, keepdim=True).clamp(min=1e-4)
+        rel = gaps / mean_gap
+
+        above = torch.zeros(b, d, device=centers.device, dtype=centers.dtype)
+        below = torch.zeros_like(above)
+        above[:, 1:] = rel
+        below[:, :-1] = rel
+        # average of the gaps above and below (repeated at the ends)
+        mid = torch.where(above > 0, above, below)
+        mid = torch.where(below > 0, (above + below) * 0.5, mid)
+        mid[:, 0] = below[:, 0]
+        mid[:, -1] = above[:, -1]
+        return torch.stack([mid, mean_gap.expand(-1, d)], dim=-1)
+
+    def forward(self, fmap: torch.Tensor, disc_centers: torch.Tensor,
+                image: torch.Tensor | None = None):
         b, c, hf, wf = fmap.shape
         if disc_centers is None:
             raise ValueError("disc_centers is required")
@@ -176,7 +302,23 @@ class _DiscLocalizedHead(nn.Module):
 
         # fmap: (B,C,H,W), att: (B,D,H,W) -> (B,D,C)
         pooled = torch.einsum("bchw,bdhw->bdc", fmap, att)
-        return self.classifier(pooled)                        # (B,5,classes)
+
+        parts = [pooled]
+        if image is not None:
+            patches = self._sample_patches(image, disc_centers)
+            patch_feat = self.patch_encoder(patches)
+            patch_stats = self._patch_stats(patches)
+            patch_all = torch.cat([patch_feat, patch_stats], dim=-1)
+            parts.append(patch_all.reshape(b, self.num_discs, -1))
+        else:
+            parts.append(pooled.new_zeros(b, self.num_discs,
+                                          DISC_PATCH_DIM + DISC_PATCH_STATS))
+        parts.append(self._spacing_features(disc_centers))
+        level_ids = torch.arange(self.num_discs, device=fmap.device)
+        parts.append(self.level_embed(level_ids).unsqueeze(0).expand(b, -1, -1))
+        parts.append(disc_centers[:, :, 1:2])
+        features = torch.cat(parts, dim=-1)
+        return self.classifier(features)                      # (B,5,classes)
 
 
 # ----------------------------------------------------------------------
@@ -300,7 +442,7 @@ class SpineFoundationModel(nn.Module):
                 b, self.num_discs, 2)
         else:
             disc_centers = disc_centers.reshape(b, self.num_discs, 2)
-        ddd_logits = self.disc_head(fmap, disc_centers)
+        ddd_logits = self.disc_head(fmap, disc_centers, image=x)
 
         out = {
             "coords": coords,

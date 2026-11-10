@@ -57,9 +57,13 @@ returns **503** by design — it never invents results.
 
    ```
    train on Colab/CPU  ->  checkpoints/best_model.pth
-   python publish_model.py --repo acme/spine-severity --with-calibration
+   python publish_model.py --repo acme/spine-severity --with-calibration --with-segmentation
    (restart the host; the API downloads the new weights and serves them)
    ```
+
+   `--with-segmentation` uploads `checkpoints/segmentation.pth` so the hosted
+   API serves real masks too; without it the API honestly reports
+   `segmentation.available=false` and falls back to landmark boxes.
 
    For a pinned, reproducible deploy pass `--rev v2` and set
    `HF_MODEL_REVISION=v2` on the host.
@@ -163,12 +167,13 @@ Service metadata (name, version, endpoints, model status, registry info).
   "status": "ok",
   "version": "2.0.0",
   "vision": {
-    "loaded": true, "checkpoint": "...", "model_version": "20261107-222501",
+    "loaded": true, "checkpoint": "...", "model_version": "20261109-120000",
     "image_size": 256,
-    "tasks": {"localization": true, "ddd": false, "seg": false},
-    "ddd_available": false,
+    "tasks": {"localization": true, "ddd": true, "seg": false},
+    "ddd_available": true,
     "detector": {"loaded": false, "error": "no weights"},
-    "segmentation": {"loaded": false, "error": "no weights"},
+    "segmentation": {"loaded": true, "val_dice": 0.486,
+                     "val_dice_per_class": [0.95, 0.58, 0.37, 0.51]},
     "error": ""
   },
   "registry": {...},
@@ -176,6 +181,12 @@ Service metadata (name, version, endpoints, model status, registry info).
   "gemini_configured": true
 }
 ```
+
+`tasks.seg` refers to the segmentation head **inside** the shared checkpoint.
+The API also serves masks from a standalone U-Net (`checkpoints/segmentation.pth`
+or `segmentation.pth` in the Hub repo); that is reported separately under
+`vision.segmentation`, and either source makes `segmentation.available` true.
+All availability fields are derived from actually loaded weights.
 
 ### `GET /ui`
 Serves the bundled frontend (`examples/frontend_demo.html`): upload, annotated
@@ -198,19 +209,30 @@ Fields:
 Success `200` returns the `AnalyzeResponse` JSON with:
 - the full decision-support case + report,
 - `evidence` (per-level Pfirrmann grades when available, landmark points,
-  geometric indicators, `ddd_available`, `model_tasks`),
+  geometric indicators, `ddd_available`, `model_tasks`). Each level carries
+  `class_probabilities` (5 softmax values), `raw_confidence` (max class
+  probability) and `calibrated_probability` = **calibrated P(Pfirrmann ≥ 2)**,
+  i.e. the probability of any degeneration at that disc, not a confidence in
+  the exact grade,
 - `annotated_image_data_url` (data-URL PNG overlay — render it directly in an
   `<img>`),
 - `gradcam_image_data_url` (data-URL PNG — a grade CAM when the DDD head is
   trained, otherwise a `kind="localization"` landmark-attention CAM),
 - `detections` (list of boxes with `label`, `class_name`, `box`,
   `confidence`, `source`) and `detection_source`
-  (`yolo` → `segmentation` → `landmark` → `none`),
+  (`yolo` → `landmark` → `segmentation` → `none`; landmark boxes keep their
+  per-level labels and carry the localizer's per-point confidence),
 - `segmentation` (`{available, error, ...}`; masks are never invented),
 - `gradcam` (`{available, ...}`),
 - `ddd_available` (false whenever Pfirrmann labels were absent at training),
 - `model_status` (which checkpoint/version produced this result),
 - `mock_vision: false`.
+
+DDD limitation to surface in any frontend: SPIDER has one labelled sagittal
+slice per case, so exact Pfirrmann accuracy is modest (about one third of 210
+validation discs, majority class ≈ 28%); within-one-grade agreement is ~80%.
+The field is reported honestly with per-class probabilities and is **not** a
+clinical diagnosis.
 
 Errors:
 - `400` malformed image or invalid JSON field,
@@ -241,19 +263,30 @@ A working single page is in `examples/frontend_demo.html` and is served at
 ### Run the whole stack locally (end-to-end check)
 
 ```powershell
-# 1. train / evaluate the localizer (256 px is the current checkpoint)
+# 1. localizer (256 px is the current checkpoint)
 python train.py --epochs 18 --image-size 256 --batch-size 8 --model convnext_femto --lr 2e-4
 python evaluate.py --checkpoint checkpoints/best_model.pth
 python preview_predictions.py --num 4      # predicted vs GT overlay PNGs
 
-# 2. start the API
-uvicorn api_server:app --host 127.0.0.1 --port 8000
+# 2. DDD head (needs dataset/ddd_labels.csv from prepare_spider.py)
+python finetune_ddd.py --epochs 250 --patience 40 --select-by loss
 
-# 3. open the frontend and Swagger UI
+# 3. segmentation + calibration (optional but recommended)
+python prepare_segmentation_pairs.py
+python train_segmentation.py --images dataset/segmentation/images `
+    --masks dataset/segmentation/masks --epochs 40
+python evaluate_segmentation.py
+python train_calibrator.py
+
+# 4. start the API (loads best_model.pth + segmentation.pth)
+uvicorn api_server:app --host 127.0.0.1 --port 8000
+curl http://127.0.0.1:8000/api/health
+
+# 5. open the frontend and Swagger UI
 #    http://127.0.0.1:8000/ui
 #    http://127.0.0.1:8000/docs
 
-# 4. or call it directly
+# 6. or call it directly
 curl -X POST http://127.0.0.1:8000/api/analyze -F "file=@scan.jpg" -F "explain=true"
 ```
 
@@ -263,7 +296,8 @@ curl -X POST http://127.0.0.1:8000/api/analyze -F "file=@scan.jpg" -F "explain=t
 
 ```bash
 export HF_TOKEN=hf_...                      # or huggingface-cli login
-python publish_model.py --repo acme/spine-severity --with-calibration
+python publish_model.py --repo acme/spine-severity \
+    --with-calibration --with-segmentation
 ```
 Then either restart the Space/Render service (picks up latest `main`), or use
 versions:

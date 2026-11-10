@@ -32,17 +32,33 @@ import config as _cfg
 from config import YOLO_CHECKPOINT, YOLO_CONF_THRESHOLD, YOLO_IOU_THRESHOLD
 
 
-def landmark_detections(coords, width: int, height: int) -> list[dict]:
-    """Build fallback detections from the 10 keypoints (pixel boxes)."""
+def landmark_detections(coords, width: int, height: int,
+                        confidence=None) -> list[dict]:
+    """Build fallback detections from the 10 keypoints (pixel boxes).
+
+    ``confidence`` (optional) is the localizer's per-keypoint confidence in
+    the same order as the boxes (5 vertebrae then 5 discs).  It is the model's
+    actual confidence, so exposing it is honest — unlike a detector score it
+    measures landmark localization certainty, which is why ``source`` stays
+    ``"landmark"``.
+    """
     from utils import landmark_boxes
 
+    conf_values = None
+    if confidence is not None:
+        conf_values = np.asarray(confidence, dtype=float).reshape(-1)
+
     detections = []
-    for item in landmark_boxes(coords, width, height, include_discs=True):
+    for index, item in enumerate(
+            landmark_boxes(coords, width, height, include_discs=True)):
+        score = None
+        if conf_values is not None and index < conf_values.size:
+            score = float(conf_values[index])
         detections.append({
             "label": item["label"],
             "class_name": item["class_name"],
             "box": item["box"],
-            "confidence": None,
+            "confidence": score,
             "source": "landmark",
         })
     return detections
@@ -153,11 +169,17 @@ def build_detections(
     detector: Optional[DetectorEngine] = None,
     image: Optional[Image.Image] = None,
     segmentation_mask: Optional[np.ndarray] = None,
+    landmark_confidence=None,
 ) -> tuple[list[dict], str]:
     """
     Choose the best available detection source.
 
-    Priority: trained YOLO -> segmentation mask boxes -> landmark-derived.
+    Priority: trained YOLO -> level-labelled landmark boxes -> segmentation
+    mask boxes (fallback only).  Landmark boxes are preferred over raw
+    mask components because only they carry per-level labels (L1..L5,
+    L1/L2..L5/S1); the segmentation mask is always exposed separately in the
+    API's ``segmentation`` field, so preferring the labelled boxes loses no
+    information.  Each source is reported explicitly.
     Returns ``(detections, source_name)``.
     """
     if detector is not None and detector.available and image is not None:
@@ -165,9 +187,14 @@ def build_detections(
         if dets:
             return dets, "yolo"
 
+    if np.asarray(coords).size:
+        return landmark_detections(
+            coords, width, height, confidence=landmark_confidence
+        ), "landmark"
+
     if segmentation_mask is not None:
         dets = segmentation_detections(segmentation_mask)
         if dets:
             return dets, "segmentation"
 
-    return landmark_detections(coords, width, height), "landmark"
+    return [], "none"

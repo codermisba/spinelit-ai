@@ -34,6 +34,7 @@ Usage
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Optional
 
@@ -116,6 +117,27 @@ def segmentation_transform(image_size: int | None = None):
     ])
 
 
+def _hub_segmentation_path() -> Optional[Path]:
+    """Download segmentation.pth from MODEL_ID when no local file exists.
+
+    Hosted deployments exclude ``checkpoints/*.pth`` from the image, so the
+    standalone U-Net has to come from the same Hub repo as the vision model.
+    Only attempted when MODEL_ID is a Hub repo id; failures are non-fatal
+    because segmentation is an optional component.
+    """
+    repo = (os.environ.get("MODEL_ID") or "").strip()
+    if not repo:
+        return None
+    try:
+        from weights import _is_hub_id, download_from_hub
+        if not _is_hub_id(repo):
+            return None
+        filename = os.environ.get("SEG_MODEL_FILENAME", "segmentation.pth")
+        return download_from_hub(repo, filename)
+    except Exception:  # noqa: BLE001 - optional task, never fatal
+        return None
+
+
 def load_segmentation_model(
     checkpoint_path: str | Path = SEG_CHECKPOINT,
     device: Optional[torch.device] = None,
@@ -125,6 +147,9 @@ def load_segmentation_model(
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.exists():
+        hub_path = _hub_segmentation_path()
+        if hub_path is not None:
+            checkpoint_path = hub_path
         raise FileNotFoundError(
             f"No segmentation checkpoint at {checkpoint_path}. Train one "
             "with: python train_segmentation.py --images ... --masks ..."
