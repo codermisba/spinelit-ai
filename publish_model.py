@@ -18,10 +18,12 @@ Usage
     python publish_model.py --repo acme/spine-severity --with-calibration
     python publish_model.py --repo acme/spine-severity --with-segmentation
     python publish_model.py --repo acme/spine-severity --rev v2
+    python publish_model.py --repo acme/spine-severity --public
 
 Uploads overwrite the same filename on the Hub by default; keep a distinct
 `--rev` (or distinct filename) when you want version pinning.  Uses the
-HF_TOKEN secret (or `huggingface-cli login`).
+HF_TOKEN secret (or `huggingface-cli login`).  The model repo is created
+(private by default) when it does not exist yet.
 """
 
 import argparse
@@ -47,6 +49,18 @@ def upload(repo_id: str, local_path: Path, filename: str,
     return url
 
 
+def ensure_repo(repo_id: str, hf_token: str | None, private: bool) -> None:
+    """Create the model repo if it does not exist (upload_file needs it)."""
+    from huggingface_hub import HfApi
+
+    HfApi(token=hf_token).create_repo(
+        repo_id=repo_id,
+        repo_type="model",
+        exist_ok=True,
+        private=private,
+    )
+
+
 def main() -> None:
     import os
 
@@ -65,6 +79,8 @@ def main() -> None:
     parser.add_argument("--with-segmentation", action="store_true",
                         help="also upload checkpoints/segmentation.pth so the "
                              "hosted API serves real masks")
+    parser.add_argument("--public", action="store_true",
+                        help="create/keep the Hub repo public (default: private)")
     args = parser.parse_args()
 
     source = Path(args.checkpoint)
@@ -77,6 +93,13 @@ def main() -> None:
         print("HF_TOKEN is not set. Uploads to private/repo-gated models "
               "will fail; public repos may still work from an authenticated "
               "`huggingface-cli login`.", file=sys.stderr)
+
+    try:
+        ensure_repo(args.repo, token, private=not args.public)
+        print(f"Hub repo ready: {args.repo} "
+              f"({'public' if args.public else 'private'})")
+    except Exception as exc:  # noqa: BLE001 - upload will report details
+        print(f"Could not create/verify repo {args.repo}: {exc}", file=sys.stderr)
 
     files = [(source, args.filename or source.name)]
     if args.with_calibration and CALIB_ARTIFACT.exists():

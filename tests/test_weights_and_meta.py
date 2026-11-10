@@ -113,6 +113,31 @@ def test_download_sidecar_failure_is_non_fatal(monkeypatch):
     assert download_sidecar("segmentation.pth") is None
 
 
+def test_ensure_repo_creates_private_model_repo(monkeypatch):
+    import huggingface_hub
+
+    import publish_model
+
+    calls = {}
+
+    class FakeApi:
+        def __init__(self, token=None):
+            calls["token"] = token
+
+        def create_repo(self, **kwargs):
+            calls.update(kwargs)
+
+    monkeypatch.setattr(huggingface_hub, "HfApi", FakeApi)
+    publish_model.ensure_repo("acme/spine-severity", "hf_test", private=True)
+    assert calls == {
+        "token": "hf_test",
+        "repo_id": "acme/spine-severity",
+        "repo_type": "model",
+        "exist_ok": True,
+        "private": True,
+    }
+
+
 def test_env_is_cleaned_between_tests():
     # Sanity: the module being imported must not leak env between test runs.
     assert os.environ.get("VISION_CHECKPOINT", "") == "" or True
