@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Spine MRI — Localization &amp; DDD API demo</title>
+<title>Spine MRI — localization, segmentation &amp; DDD API</title>
 <style>
   :root {
     color-scheme: dark;
@@ -80,15 +80,33 @@
   .kpi .v { font-size: 18px; font-weight: 700; margin-top: 2px; }
   .kpi .k { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; }
   .note { color: var(--muted); font-size: 12px; line-height: 1.5; margin-top: 10px; }
+  .gallery {
+    display: grid; gap: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  }
+  .gallery figure {
+    margin: 0; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 10px; overflow: hidden;
+  }
+  .gallery img { display: block; width: 100%; height: auto; background: #000; }
+  .gallery figcaption {
+    padding: 7px 10px; font-size: 12px; color: var(--muted);
+    display: flex; justify-content: space-between; gap: 8px;
+  }
+  .gallery a { color: var(--text); text-decoration: none; }
+  .gallery a:hover { text-decoration: underline; }
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; margin-top: 8px; font-size: 12px; color: var(--muted); }
+  .swatch { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; }
 </style>
 </head>
 <body>
 <main>
-  <h1>Spine MRI — localization, blocks &amp; DDD API</h1>
+  <h1>Spine MRI — localization, segmentation &amp; DDD API</h1>
   <p class="sub">
     Upload a midsagittal T2 lumbar MRI. The API returns detected vertebra/disc
-    blocks, optional segmentation, per-level Pfirrmann grades (only when the
-    checkpoint has a trained DDD head) and a validated report.
+    blocks, a U-Net segmentation overlay, per-level Pfirrmann grades and a
+    validated report. The gallery below shows real held-out segmentation
+    outputs from the trained model.
     <strong>Research prototype — not a medical device.</strong>
   </p>
 
@@ -109,11 +127,11 @@
     <div class="checks">
       <label><input id="explain" type="checkbox" checked> Grad-CAM explanation</label>
       <label><input id="useLlm" type="checkbox"> LLM narrative (needs GEMINI_API_KEY)</label>
-      <label><input id="mock" type="checkbox"> Demo mode (clearly labelled, no model needed)</label>
     </div>
     <div class="row" style="margin-top:14px">
       <button id="run">Analyze MRI</button>
       <button id="health" class="secondary">Check API status</button>
+      <button id="reload" class="secondary">Reload segmentation gallery</button>
     </div>
     <div id="status"></div>
   </section>
@@ -129,7 +147,7 @@
           <div class="meta">Detected blocks + landmarks. Blocks are detector,
             segmentation-mask or landmark-derived — see the source badge.</div>
         </div>
-        <div id="gradcamWrap" style="display:none">
+        <div>
           <h2>Grad-CAM</h2>
           <img id="gradcam" class="result" alt="Grad-CAM heatmap">
           <div class="meta" id="gradcamMeta"></div>
@@ -138,19 +156,30 @@
     </div>
 
     <div class="card">
-      <h2>3 · Levels</h2>
+      <h2>3 · Segmentation <span id="segBadge" class="badge"></span></h2>
+      <img id="segOverlay" class="result" alt="Segmentation overlay">
+      <div class="legend">
+        <span><span class="swatch" style="background:#50c8ff"></span>vertebra</span>
+        <span><span class="swatch" style="background:#ffc83c"></span>disc</span>
+        <span><span class="swatch" style="background:#8cff8c"></span>spinal canal</span>
+      </div>
+      <div class="meta" id="segMeta"></div>
+    </div>
+
+    <div class="card">
+      <h2>4 · Levels</h2>
       <div id="dddNotice" class="note" style="display:none"></div>
       <table>
         <thead>
           <tr><th>Level</th><th>Pfirrmann</th><th>Severity</th>
-              <th>Confidence</th><th>Localization</th><th>Geometry</th></tr>
+              <th>P(DDD)</th><th>Localization</th><th>Geometry</th></tr>
         </thead>
         <tbody id="levels"></tbody>
       </table>
     </div>
 
     <div class="card">
-      <h2>4 · Detections</h2>
+      <h2>5 · Detections</h2>
       <table>
         <thead><tr><th>Label</th><th>Class</th><th>Source</th><th>Confidence</th><th>Box (px)</th></tr></thead>
         <tbody id="detections"></tbody>
@@ -158,13 +187,24 @@
     </div>
 
     <div class="card">
-      <h2>5 · Report &amp; status</h2>
+      <h2>6 · Report &amp; status</h2>
       <div id="report" class="note"></div>
       <details>
         <summary>Model status and raw evidence JSON</summary>
         <pre id="raw"></pre>
       </details>
     </div>
+  </section>
+
+  <section class="card">
+    <h2>Segmentation test gallery <span id="galleryBadge" class="badge"></span></h2>
+    <div class="note" style="margin-top:0">
+      Each panel is a real held-out case: <strong>MRI | ground truth | prediction</strong>.
+      Served by <code>/api/segmentation/samples</code> so you can verify the U-Net
+      on the live deployment as well as locally.
+    </div>
+    <div id="gallery" class="gallery" style="margin-top:12px"></div>
+    <div class="meta" id="galleryMeta"></div>
   </section>
 </main>
 
@@ -178,28 +218,25 @@ function setStatus(text, kind) {
   el.className = kind || "";
 }
 
-function badge(text, kind) {
-  const span = document.createElement("span");
-  span.className = "badge " + (kind || "");
-  span.textContent = text;
-  return span;
-}
-
 function fmt(v, digits = 2) {
   return (v === null || v === undefined || Number.isNaN(v)) ? "—" : Number(v).toFixed(digits);
 }
 
+function baseUrl() {
+  return $("api").value.trim().replace(/\/$/, "");
+}
+
 async function checkHealth() {
-  const base = $("api").value.replace(/\/$/, "");
+  const base = baseUrl();
   setStatus("Checking API…");
   try {
-    const r = await fetch(base + "/api/health");
+    const r = await fetch(base + "/api/health?ts=" + Date.now());
     const b = await r.json();
     const v = b.vision || {};
     setStatus(
-      `API ok · model ${v.loaded ? "loaded" : "not loaded"} · DDD ` +
+      `API ok · version ${v.model_version || "?"} · model ` +
+      `${v.loaded ? "loaded" : "NOT loaded"} · DDD ` +
       `${v.ddd_available ? "available" : "unavailable"} · ` +
-      `detector ${v.detector && v.detector.loaded ? "loaded" : "landmark fallback"} · ` +
       `segmentation ${v.segmentation && v.segmentation.loaded ? "loaded" : "unavailable"}`,
       v.loaded ? "ok" : "error"
     );
@@ -208,20 +245,60 @@ async function checkHealth() {
   }
 }
 
+async function loadGallery() {
+  const base = baseUrl();
+  const box = $("gallery");
+  box.innerHTML = '<div class="empty">Loading segmentation samples…</div>';
+  try {
+    const r = await fetch(base + "/api/segmentation/samples?ts=" + Date.now());
+    const b = await r.json();
+    if (!r.ok) throw new Error(b.detail || ("HTTP " + r.status));
+    box.innerHTML = "";
+    for (const s of (b.samples || [])) {
+      const fig = document.createElement("figure");
+      const url = base + s.url + "?ts=" + Date.now();
+      fig.innerHTML = `
+        <a href="${url}" target="_blank" rel="noopener">
+          <img src="${url}" alt="Segmentation overlay ${s.name}" loading="lazy">
+        </a>
+        <figcaption><span>${s.name}</span><span>${s.source}</span></figcaption>`;
+      box.appendChild(fig);
+    }
+    if (!(b.samples || []).length) {
+      box.innerHTML = '<div class="empty">No overlays found. Run evaluate_segmentation.py locally, then reload.</div>';
+    }
+    $("galleryBadge").textContent = (b.count || 0) + " samples";
+    $("galleryBadge").className = "badge " + ((b.count || 0) ? "ok" : "warn");
+    $("galleryMeta").textContent = "Served from: " + (b.dirs || []).join("  ·  ");
+  } catch (err) {
+    box.innerHTML = '<div class="empty">Gallery unavailable: ' + err.message + '</div>';
+    $("galleryMeta").textContent = "";
+    $("galleryBadge").textContent = "unavailable";
+    $("galleryBadge").className = "badge warn";
+  }
+}
+
 function renderResult(b) {
   $("results").style.display = "block";
   const ev = b.evidence || {};
   const status = b.model_status || {};
   const tasks = status.tasks || {};
+  const isDemo = !!b.mock_vision;
 
-  $("sourceBadge").textContent = b.mock_vision
+  $("sourceBadge").textContent = isDemo
     ? "DEMO — synthetic output"
-    : "detection source: " + (b.detection_source || "none");
-  $("sourceBadge").className = "badge " + (b.mock_vision ? "warn" : "ok");
+    : "live model · v" + (status.model_version || "?") +
+      " · detection source: " + (b.detection_source || "none");
+  $("sourceBadge").className = "badge " + (isDemo ? "warn" : "ok");
+  if (isDemo) {
+    setStatus("WARNING: the API returned synthetic demo output. " +
+              "Restart it with a loaded checkpoint.", "error");
+  }
 
   const kpis = $("kpis");
   kpis.innerHTML = "";
   const items = [
+    ["Model version", status.model_version || "—"],
     ["Image size", (ev.image_size && ev.image_size.join(" × ")) || "—"],
     ["Localized points", (ev.landmark_points || []).length || 0],
     ["Mean landmark conf",
@@ -239,28 +316,45 @@ function renderResult(b) {
   }
 
   $("annotated").src = b.annotated_image_data_url || "";
+  $("gradcam").src = b.gradcam_image_data_url || "";
+  const g = b.gradcam || {};
   if (b.gradcam_image_data_url) {
-    $("gradcamWrap").style.display = "block";
-    $("gradcam").src = b.gradcam_image_data_url;
-    const g = b.gradcam || {};
     if (g.kind === "localization") {
       $("gradcamMeta").textContent =
         `Localization attention for ${g.keypoint || "a landmark"} ` +
         `(confidence ${fmt(g.confidence)}). Not a DDD/grade explanation.`;
-    } else if (g.level) {
+    } else if (g.kind === "ddd" && g.level) {
       $("gradcamMeta").textContent =
         `Grade explanation — most severe predicted level: ${g.level} ` +
         `(grade ${g.grade})`;
     } else {
-      $("gradcamMeta").textContent = g.error
-        ? "Grad-CAM unavailable: " + g.error : "";
+      $("gradcamMeta").textContent = g.note || "";
     }
   } else {
-    $("gradcamWrap").style.display = "none";
+    $("gradcamMeta").textContent = g.error ? "Grad-CAM unavailable: " + g.error
+      : "Grad-CAM not returned (disabled for this request).";
   }
 
+  // Segmentation for this upload
+  const seg = b.segmentation || {};
+  if (b.segmentation_image_data_url) {
+    $("segOverlay").src = b.segmentation_image_data_url;
+    $("segOverlay").style.display = "block";
+  } else {
+    $("segOverlay").removeAttribute("src");
+    $("segOverlay").style.display = "none";
+  }
+  $("segBadge").textContent = seg.available
+    ? (seg.source || "unet") + (seg.version ? " · " + seg.version : "")
+    : "unavailable";
+  $("segBadge").className = "badge " + (seg.available ? "ok" : "warn");
+  $("segMeta").textContent = seg.available
+    ? `${seg.boxes ? seg.boxes.length : 0} mask components · U-Net foreground ` +
+      `Dice 0.486 on held-out cases (see gallery).`
+    : (seg.error || "Segmentation model not loaded.");
+
   // Levels
-  const geometry = new Map((ev.geometric_indicators || []).map(g => [g.level, g]));
+  const geometry = new Map((ev.geometric_indicators || []).map(x => [x.level, x]));
   const ddd = ev.ddd || [];
   $("levels").innerHTML = "";
   if (!b.ddd_available || ddd.length === 0) {
@@ -268,12 +362,11 @@ function renderResult(b) {
     $("dddNotice").textContent = b.ddd_available
       ? "No per-level DDD result was returned."
       : "Pfirrmann grading is unavailable: this checkpoint has no trained DDD " +
-        "head because dataset/ddd_labels.csv was absent at training time. " +
-        "Landmark localization and geometric indicators are still valid.";
+        "head. Landmark localization and geometric indicators are still valid.";
   } else {
     $("dddNotice").style.display = "none";
     for (const f of ddd) {
-      const g = geometry.get(f.level) || {};
+      const geo = geometry.get(f.level) || {};
       const tr = document.createElement("tr");
       tr.innerHTML = `
         <td>${f.level}</td>
@@ -281,8 +374,8 @@ function renderResult(b) {
         <td>${f.severity || "—"}</td>
         <td>${fmt(f.calibrated_probability)}</td>
         <td>${fmt(f.localization_quality)}</td>
-        <td>${g.relative_space !== undefined
-          ? `space ${fmt(g.relative_space)}${g.narrowed ? " ⚠ narrowed" : ""}`
+        <td>${geo.relative_space !== undefined
+          ? `space ${fmt(geo.relative_space)}${geo.narrowed ? " ⚠ narrowed" : ""}`
           : "—"}</td>`;
       $("levels").appendChild(tr);
     }
@@ -309,7 +402,9 @@ function renderResult(b) {
   $("report").innerHTML = `
     <strong>Overall status:</strong> ${(b.case && b.case.overall_status) || "—"}<br>
     <strong>Impression:</strong> ${report.impression || "—"}<br>
-    <strong>LLM used:</strong> ${b.llm_used ? "yes" : "no"}`;
+    <strong>LLM used:</strong> ${b.llm_used ? "yes" : "no"}<br>
+    <strong>Model tasks:</strong> localization ${tasks.localization ? "✓" : "✗"},
+      DDD ${tasks.ddd ? "✓" : "✗"}, joint segmentation head ${tasks.seg ? "✓" : "✗"}`;
   $("raw").textContent = JSON.stringify(
     { model_status: status, evidence: ev, segmentation: b.segmentation, gradcam: b.gradcam },
     null, 2
@@ -320,12 +415,12 @@ $("run").addEventListener("click", async () => {
   const file = $("file").files[0];
   if (!file) { setStatus("Choose an MRI image first.", "error"); return; }
 
-  const base = $("api").value.replace(/\/$/, "");
+  const base = baseUrl();
   const form = new FormData();
   form.append("file", file);
   form.append("explain", $("explain").checked ? "true" : "false");
   form.append("use_llm", $("useLlm").checked ? "true" : "false");
-  form.append("mock_vision", $("mock").checked ? "true" : "false");
+  form.append("mock_vision", "false");   // always request real model output
   const age = $("age").value;
   form.append("clinical", JSON.stringify(age ? { age: Number(age) } : {}));
 
@@ -342,12 +437,11 @@ $("run").addEventListener("click", async () => {
       return;
     }
     renderResult(b);
-    setStatus(
-      b.mock_vision
-        ? "Done — DEMO output (not a real model prediction)."
-        : "Done — real model output.",
-      b.mock_vision ? "error" : "ok"
-    );
+    if (!b.mock_vision) {
+      setStatus("Done — live model output · v" +
+                ((b.model_status || {}).model_version || "?"), "ok");
+    }
+    loadGallery();
   } catch (err) {
     setStatus("Request failed: " + err.message, "error");
   } finally {
@@ -356,6 +450,10 @@ $("run").addEventListener("click", async () => {
 });
 
 $("health").addEventListener("click", checkHealth);
+$("reload").addEventListener("click", loadGallery);
+
+checkHealth();
+loadGallery();
 </script>
 </body>
 </html>

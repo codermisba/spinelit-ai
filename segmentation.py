@@ -208,6 +208,23 @@ def segment_image(model, image: Image.Image, device: torch.device,
     }
 
 
+def blend_mask_overlay(image: Image.Image, overlay: np.ndarray,
+                       alpha: float = 0.45) -> Image.Image:
+    """Blend a colour class mask over the original scan for the frontend."""
+    rgb = image.convert("RGB")
+    base = np.asarray(rgb, dtype=np.float32)
+    mask = np.asarray(overlay)
+    if mask.ndim != 3 or mask.shape[:2] != base.shape[:2]:
+        return rgb
+    foreground = mask.sum(axis=-1) > 0
+    out = base.copy()
+    out[foreground] = (
+        (1.0 - alpha) * base[foreground]
+        + alpha * mask[foreground].astype(np.float32)
+    )
+    return Image.fromarray(np.clip(out, 0, 255).astype(np.uint8), mode="RGB")
+
+
 def _class_colour_lut() -> np.ndarray:
     names = list(_cfg.SEG_CLASS_NAMES)
     configured = dict(_cfg.SEG_CLASS_COLOURS)

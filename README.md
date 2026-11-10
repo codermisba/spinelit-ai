@@ -243,8 +243,10 @@ frontend over HTTPS:
 
 - `GET  /` and `GET /api/health` — service metadata, model status/version
 - `POST /api/analyze` — multipart `file` upload → annotated overlay
-  (data-URL PNG), Grad-CAM overlay, per-level DDD table, detections with their
-  source, report and model version
+  (data-URL PNG), U-Net segmentation overlay, Grad-CAM overlay, per-level DDD
+  table, detections with their source, report and model version
+- `GET  /api/segmentation/samples` — real held-out segmentation overlays for
+  the frontend test gallery
 - `GET  /ui` — bundled single-page frontend (`examples/frontend_demo.html`)
 - `GET  /docs` — interactive OpenAPI/Swagger UI
 
@@ -292,12 +294,18 @@ curl -X POST http://127.0.0.1:8000/api/analyze \
 const fd = new FormData();
 fd.append("file", fileInput.files[0]);
 fd.append("explain", "true");
-const res = await fetch("http://127.0.0.1:8000/api/analyze", {
+fd.append("mock_vision", "false");
+const base = "http://127.0.0.1:8000";
+const res = await fetch(base + "/api/analyze", {
   method: "POST", body: fd,
 });
 const data = await res.json();
 document.querySelector("#annotated").src = data.annotated_image_data_url;
+document.querySelector("#segmentation").src = data.segmentation_image_data_url;
 document.querySelector("#gradcam").src = data.gradcam_image_data_url;
+
+// real held-out segmentation overlays for a test gallery
+const samples = await (await fetch(`${base}/api/segmentation/samples`)).json();
 ```
 
 Retraining keeps working without code changes: weights are versioned on the

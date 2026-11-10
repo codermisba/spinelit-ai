@@ -55,6 +55,7 @@ import io
 import json
 import logging
 import os
+import re
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -320,6 +321,7 @@ class AnalyzeResponse(DecisionSupportResult):
     evidence: dict = Field(default_factory=dict)
     annotated_image_data_url: str = ""
     gradcam_image_data_url: str = ""
+    segmentation_image_data_url: str = ""
     detections: list[dict] = Field(default_factory=list)
     detection_source: str = ""
     segmentation: dict = Field(default_factory=dict)
@@ -338,7 +340,8 @@ def root():
         "docs": "/docs",
         "openapi": "/openapi.json",
         "ui": "/ui",
-        "endpoints": ["/api/health", "/api/analyze", "/ui"],
+        "endpoints": ["/api/health", "/api/analyze", "/ui",
+                      "/api/segmentation/samples"],
         "vision": engine.status(),
         "registry": weights.cache_config_summary(),
         "gemini_configured": _gemini_configured(),
@@ -347,16 +350,79 @@ def root():
 
 UI_PATH = Path(__file__).resolve().parent / "examples" / "frontend_demo.html"
 
+# Segmentation prediction galleries.  ``examples/segmentation_samples`` is
+# committed so a hosted deployment (which excludes ``outputs/``) still has
+# real overlays to show; ``outputs/segmentation`` is picked up automatically
+# after running ``evaluate_segmentation.py`` locally.
+CODE_DIR = Path(__file__).resolve().parent
+SEG_SAMPLE_DIRS = [
+    ("samples", CODE_DIR / "examples" / "segmentation_samples"),
+    ("outputs", CODE_DIR / "outputs" / "segmentation"),
+]
+_SEG_SAMPLE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.png$")
+
 
 @app.get("/ui", include_in_schema=False)
 def ui():
-    """Serve the bundled single-page frontend demo."""
+    """Serve the bundled single-page frontend (never cached)."""
     if not UI_PATH.exists():
         return JSONResponse(
             status_code=404,
             content={"detail": f"Frontend not found at {UI_PATH}"},
         )
-    return FileResponse(UI_PATH, media_type="text/html")
+    return FileResponse(
+        UI_PATH,
+        media_type="text/html",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
+
+
+@app.get("/api/segmentation/samples")
+def segmentation_samples():
+    """List real U-Net overlays available for the frontend gallery."""
+    samples, seen = [], set()
+    for source, folder in SEG_SAMPLE_DIRS:
+        if not folder.is_dir():
+            continue
+        for path in sorted(folder.glob("*.png")):
+            if path.name in seen:
+                continue
+            seen.add(path.name)
+            samples.append({
+                "name": path.stem,
+                "file": path.name,
+                "source": source,
+                "size_bytes": path.stat().st_size,
+                "url": f"/api/segmentation/samples/{path.name}",
+            })
+    return {
+        "count": len(samples),
+        "dirs": [str(folder) for _, folder in SEG_SAMPLE_DIRS],
+        "samples": samples,
+    }
+
+
+@app.get("/api/segmentation/samples/{filename}", include_in_schema=False)
+def segmentation_sample(filename: str):
+    """Serve one overlay PNG from the whitelisted gallery directories."""
+    if not _SEG_SAMPLE_NAME.match(filename):
+        return JSONResponse(
+            status_code=400, content={"detail": "Invalid sample name."})
+    for _source, folder in SEG_SAMPLE_DIRS:
+        try:
+            root = folder.resolve()
+            candidate = (folder / filename).resolve()
+            candidate.relative_to(root)
+        except (OSError, ValueError):
+            continue
+        if candidate.is_file():
+            return FileResponse(
+                candidate,
+                media_type="image/png",
+                headers={"Cache-Control": "no-store, max-age=0"},
+            )
+    return JSONResponse(
+        status_code=404, content={"detail": "Sample not found."})
 
 
 @app.get("/api/health")
@@ -399,6 +465,7 @@ async def analyze(
         return JSONResponse(status_code=400, content={"detail": f"Bad image: {exc}"})
 
     gradcam_image = None
+    segmentation_image = None
     if mock_mode:
         card, annotated = mock_evidence_and_draw(image, file.filename or "")
         detections = list(card.detections)
@@ -431,6 +498,7 @@ async def analyze(
         detections = result["detections"]
         detection_source = result["detection_source"]
         segmentation = result["segmentation"]
+        segmentation_image = result.get("segmentation_image")
         gradcam = result.get("gradcam") or {}
         ddd_available = bool(result["card"].ddd_available)
 
@@ -474,6 +542,9 @@ async def analyze(
     payload["annotated_image_data_url"] = _png_data_url(annotated)
     payload["gradcam_image_data_url"] = (
         _png_data_url(gradcam_image) if gradcam_image is not None else ""
+    )
+    payload["segmentation_image_data_url"] = (
+        _png_data_url(segmentation_image) if segmentation_image is not None else ""
     )
     payload["detections"] = detections
     payload["detection_source"] = detection_source

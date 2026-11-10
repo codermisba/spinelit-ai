@@ -76,7 +76,8 @@ returns **503** by design — it never invents results.
 
 ## One-file pick
 
-- `api_server.py` — FastAPI app (`/`, `/api/health`, `/api/analyze`, `/ui`, `/docs`)
+- `api_server.py` — FastAPI app (`/`, `/api/health`, `/api/analyze`, `/ui`, `/docs`,
+  `/api/segmentation/samples`)
 - `examples/frontend_demo.html` — single-page frontend served at `/ui`
 - `Dockerfile` — CPU-torch image (works on HF Spaces **and** Render)
 - `weights.py` — HF Hub model registry + auto-download
@@ -190,7 +191,31 @@ All availability fields are derived from actually loaded weights.
 
 ### `GET /ui`
 Serves the bundled frontend (`examples/frontend_demo.html`): upload, annotated
-view, Grad-CAM view, per-level table and detection table.
+view, Grad-CAM view, U-Net overlay, per-level table, detection table and a
+segmentation test gallery. The response is sent with `Cache-Control: no-store`
+so a redeployed frontend is never masked by a stale browser cache.
+
+### `GET /api/segmentation/samples`
+Lists the real held-out segmentation overlays available to the frontend:
+
+```json
+{
+  "count": 4,
+  "dirs": [".../examples/segmentation_samples", ".../outputs/segmentation"],
+  "samples": [
+    {"name": "100_t2_overlay", "file": "100_t2_overlay.png",
+     "source": "samples", "size_bytes": 97248,
+     "url": "/api/segmentation/samples/100_t2_overlay.png"}
+  ]
+}
+```
+
+Each PNG is the 3-panel evaluation figure (`MRI | ground truth | prediction`)
+written by `evaluate_segmentation.py`. `examples/segmentation_samples/` is
+committed, so the gallery works on a hosted deployment even though `outputs/`
+is excluded from Git and Docker; locally-produced overlays are added
+automatically. Individual files are served at
+`GET /api/segmentation/samples/{file}` (whitelisted `.png` names only).
 
 ### `POST /api/analyze`  (multipart/form-data)
 Fields:
@@ -219,6 +244,9 @@ Success `200` returns the `AnalyzeResponse` JSON with:
   unchanged (no heuristic rescaling),
 - `annotated_image_data_url` (data-URL PNG overlay — render it directly in an
   `<img>`),
+- `segmentation_image_data_url` (data-URL PNG: the U-Net class mask blended
+  over the uploaded scan; `""` when segmentation is unavailable or on the
+  explicit demo path),
 - `gradcam_image_data_url` (data-URL PNG — a grade CAM when the DDD head is
   trained, otherwise a `kind="localization"` landmark-attention CAM),
 - `detections` (list of boxes with `label`, `class_name`, `box`,

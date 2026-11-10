@@ -39,7 +39,7 @@ import weights
 from calibration import calibrate_ddd
 from detector import DetectorEngine, build_detections
 from schemas import EvidenceCard, build_evidence_card
-from segmentation import SegmentationEngine
+from segmentation import SegmentationEngine, blend_mask_overlay
 from utils import (
     compute_geometric_indicators,
     decode_outputs,
@@ -219,6 +219,7 @@ class VisionEngine:
                 "detections": [],
                 "detection_source": "none",
                 "segmentation": {"available": False, "source": "none"},
+                "segmentation_image": None,
                 "gradcam": None,
                 "decoded": {},
             }
@@ -232,11 +233,13 @@ class VisionEngine:
 
         # ---- segmentation (standalone model preferred) -----------------
         segmentation_info = {"available": False, "source": "none"}
+        segmentation_image = None
         seg_mask = None
         if self._segmentation is not None and self._segmentation.available:
             try:
                 seg = self._segmentation.analyze(image)
                 seg_mask = seg["mask"]
+                segmentation_image = blend_mask_overlay(image, seg["overlay"])
                 segmentation_info = {
                     "available": True,
                     "source": "unet",
@@ -320,6 +323,7 @@ class VisionEngine:
             "detections": detections,
             "detection_source": detection_source,
             "segmentation": segmentation_info,
+            "segmentation_image": segmentation_image,
             "gradcam": gradcam,
             "decoded": decoded,
         }
