@@ -143,12 +143,12 @@ def load_segmentation_model(
     checkpoint_path = Path(checkpoint_path)
     if not checkpoint_path.exists():
         hub_path = _hub_segmentation_path()
-        if hub_path is not None:
-            checkpoint_path = hub_path
-        raise FileNotFoundError(
-            f"No segmentation checkpoint at {checkpoint_path}. Train one "
-            "with: python train_segmentation.py --images ... --masks ..."
-        )
+        if hub_path is None or not Path(hub_path).exists():
+            raise FileNotFoundError(
+                f"No segmentation checkpoint at {checkpoint_path}. Train one "
+                "with: python train_segmentation.py --images ... --masks ..."
+            )
+        checkpoint_path = Path(hub_path)
 
     checkpoint = torch.load(checkpoint_path, map_location=device,
                             weights_only=False)
