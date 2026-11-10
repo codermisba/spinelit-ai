@@ -87,6 +87,26 @@ returns **503** by design — it never invents results.
 
 ## Option A — Hugging Face Spaces (recommended)
 
+### Automated: one command
+
+Once the weights are on the Hub (`publish_model.py`, see below), the Space can
+be created, configured and uploaded in a single step:
+
+```bash
+export HF_TOKEN=hf_...            # PowerShell: $env:HF_TOKEN="hf_..."
+python publish_model.py --repo you/spine-severity \
+    --with-calibration --with-segmentation
+python deploy_space.py --model-repo you/spine-severity
+```
+
+`deploy_space.py` creates the Docker Space (private by default, `--public` to
+open it), uploads the source tree, writes the README frontmatter below and
+sets `MODEL_ID` (variable) plus `HF_TOKEN` (secret) so the container can pull
+the private weights at startup. It prints the live `/ui`, `/api/health` and
+build-log URLs. Re-run it after any code change to redeploy.
+
+### Manual
+
 1. Create a Space at <https://huggingface.co/spaces>:
    - SDK: **Docker** (custom), Hardware: **CPU basic** (free is fine).
 2. Keep the Space metadata at the top of `README.md`. The Space UI writes it
