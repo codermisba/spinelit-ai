@@ -146,6 +146,22 @@ def test_integration_guide_is_served_as_markdown():
     assert "/api/segmentation/samples" in body
 
 
+def test_docker_context_includes_integration_guide():
+    """A hosted image without the guide would serve a 404 at /integration."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    patterns = [
+        line.strip()
+        for line in (root / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ]
+    # `docs/` or `docs` would drop the guide before the image is built.
+    assert "docs/" not in patterns
+    assert "docs" not in patterns
+    assert (root / "docs" / "FRONTEND_INTEGRATION.md").is_file()
+
+
 def test_analyze_returns_input_image_and_explanation(monkeypatch):
     """The demo path still exercises the real explanation plumbing."""
     import io
