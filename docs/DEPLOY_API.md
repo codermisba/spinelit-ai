@@ -213,7 +213,10 @@ Success `200` returns the `AnalyzeResponse` JSON with:
   `class_probabilities` (5 softmax values), `raw_confidence` (max class
   probability) and `calibrated_probability` = **calibrated P(Pfirrmann ≥ 2)**,
   i.e. the probability of any degeneration at that disc, not a confidence in
-  the exact grade,
+  the exact grade. The calibrator is loaded from `checkpoints/calibration.pkl`;
+  when that file is missing on a hosted deployment it is downloaded from the
+  `MODEL_ID` repo, and with no artifact at all the raw P(DDD) is served
+  unchanged (no heuristic rescaling),
 - `annotated_image_data_url` (data-URL PNG overlay — render it directly in an
   `<img>`),
 - `gradcam_image_data_url` (data-URL PNG — a grade CAM when the DDD head is

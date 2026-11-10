@@ -122,18 +122,13 @@ def _hub_segmentation_path() -> Optional[Path]:
 
     Hosted deployments exclude ``checkpoints/*.pth`` from the image, so the
     standalone U-Net has to come from the same Hub repo as the vision model.
-    Only attempted when MODEL_ID is a Hub repo id; failures are non-fatal
-    because segmentation is an optional component.
+    Only attempted when the deployment is configured with a Hub repo id;
+    failures are non-fatal because segmentation is an optional component.
     """
-    repo = (os.environ.get("MODEL_ID") or "").strip()
-    if not repo:
-        return None
     try:
-        from weights import _is_hub_id, download_from_hub
-        if not _is_hub_id(repo):
-            return None
+        from weights import download_sidecar
         filename = os.environ.get("SEG_MODEL_FILENAME", "segmentation.pth")
-        return download_from_hub(repo, filename)
+        return download_sidecar(filename)
     except Exception:  # noqa: BLE001 - optional task, never fatal
         return None
 

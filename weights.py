@@ -107,6 +107,35 @@ def _resolve(candidate: str) -> Path:
     return download_from_hub(candidate)
 
 
+def configured_hub_repo() -> str | None:
+    """Return the Hub repo id this deployment resolves weights from, if any."""
+    candidate = (
+        os.environ.get("VISION_CHECKPOINT")
+        or os.environ.get("MODEL_ID")
+        or ""
+    ).strip()
+    return candidate if candidate and _is_hub_id(candidate) else None
+
+
+def download_sidecar(filename: str, repo_id: str | None = None) -> Path | None:
+    """Best-effort download of an auxiliary artifact from the weights repo.
+
+    Used by optional components (calibration, segmentation) that live in the
+    same Hub repo as the main checkpoint.  Returns ``None`` when no Hub repo
+    is configured or the file is absent, so an optional task degrades to
+    "unavailable" instead of failing startup.
+    """
+    repo = repo_id or configured_hub_repo()
+    if not repo:
+        return None
+    try:
+        return download_from_hub(repo, filename)
+    except ModelResolutionError as exc:
+        logger.info("Optional artifact %s unavailable on %s: %s",
+                    filename, repo, exc)
+        return None
+
+
 def download_from_hub(repo_id: str, filename: str | None = None) -> Path:
     """Download `<filename>` from an HF Hub model repo into the local cache."""
     filename = filename or HF_MODEL_FILENAME

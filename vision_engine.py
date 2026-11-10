@@ -36,6 +36,7 @@ import torch
 from PIL import Image
 
 import weights
+from calibration import calibrate_ddd
 from detector import DetectorEngine, build_detections
 from schemas import EvidenceCard, build_evidence_card
 from segmentation import SegmentationEngine
@@ -277,6 +278,7 @@ class VisionEngine:
             ddd_prob=decoded.get("ddd_prob"),
             ddd_conf=decoded.get("ddd_conf"),
             image_name=image_name,
+            calibrate=calibrate_ddd,
             ddd_available=ddd_available,
             image_size=(width, height),
         )

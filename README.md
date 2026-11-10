@@ -226,7 +226,10 @@ preprocess with exactly the training-time configuration.
   checkpoint the raw probability is already well calibrated (held-out Brier
   0.111, ECE 0.047) and the isotonic fit was slightly worse (0.119 / 0.070),
   so the artifact keeps the raw probability via a passthrough flag instead of
-  shipping a worse correction.
+  shipping a worse correction. Without an artifact the API also serves the
+  raw P(Pfirrmann ≥ 2) unchanged (`source="raw-passthrough"`); on a hosted
+  deployment `calibration.pkl` is downloaded from the same Hub repo as the
+  checkpoint, so no manual copy is needed.
 
 Without a checkpoint the pipeline still runs in a **degraded mode**: it shows
 the LLM reasoning/report skeleton and clear model-status, but vision tables

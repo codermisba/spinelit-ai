@@ -110,8 +110,9 @@ python publish_model.py --repo acme/spine-severity \
     --with-calibration --with-segmentation
 ```
 
-The API downloads `best_model.pth` and `segmentation.pth` from the Hub repo
-named by `MODEL_ID`; nothing has to be copied onto the host.
+The API downloads `best_model.pth`, `segmentation.pth` and
+`calibration.pkl` from the Hub repo named by `MODEL_ID`; nothing has to be
+copied onto the host.
 
 ## Use the trained model back home (Windows)
 

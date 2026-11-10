@@ -1,12 +1,18 @@
 """Model-registry + checkpoint-metadata tests (no network, no GPU)."""
 
 import os
+from pathlib import Path
 
 import pytest
 
 import config as _cfg
 from utils import _apply_checkpoint_meta
-from weights import ModelResolutionError, _is_hub_id, resolve_checkpoint
+from weights import (
+    ModelResolutionError,
+    _is_hub_id,
+    download_sidecar,
+    resolve_checkpoint,
+)
 
 
 def test_hub_id_detection():
@@ -70,6 +76,41 @@ def test_resolve_checkpoint_nothing_configured_raises(monkeypatch, tmp_path):
     monkeypatch.setattr("weights.RELEASE_MODEL", tmp_path / "release_model.pth")
     with pytest.raises(ModelResolutionError):
         resolve_checkpoint()
+
+
+def test_download_sidecar_no_hub_repo_returns_none(monkeypatch):
+    monkeypatch.delenv("VISION_CHECKPOINT", raising=False)
+    monkeypatch.delenv("MODEL_ID", raising=False)
+    assert download_sidecar("calibration.pkl") is None
+
+
+def test_download_sidecar_uses_configured_repo(monkeypatch):
+    import weights
+
+    monkeypatch.setenv("MODEL_ID", "acme/spine-severity")
+    seen = {}
+
+    def fake_download(repo_id, filename=None):
+        seen["repo"] = repo_id
+        seen["filename"] = filename
+        return Path("cached.pkl")
+
+    monkeypatch.setattr(weights, "download_from_hub", fake_download)
+    assert download_sidecar("calibration.pkl") == Path("cached.pkl")
+    assert seen == {"repo": "acme/spine-severity",
+                    "filename": "calibration.pkl"}
+
+
+def test_download_sidecar_failure_is_non_fatal(monkeypatch):
+    import weights
+
+    monkeypatch.setenv("VISION_CHECKPOINT", "acme/spine-severity")
+
+    def explode(repo_id, filename=None):
+        raise ModelResolutionError("404")
+
+    monkeypatch.setattr(weights, "download_from_hub", explode)
+    assert download_sidecar("segmentation.pth") is None
 
 
 def test_env_is_cleaned_between_tests():

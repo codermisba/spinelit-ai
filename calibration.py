@@ -17,10 +17,15 @@ Two modes
    artifact stores an identity/passthrough flag instead of shipping a worse
    correction.
 
-2. Deterministic fallback (no labels). A principled heuristic so the
-   pipeline is fully self-contained on a fresh clone:
-       P  = 0.6 * severity_prior + 0.4 * raw_model_confidence
-   This is clearly documented as an uncalibrated fallback.
+2. Raw passthrough (no artifact). The head's own P(Pfirrmann >= 2) is served
+   unchanged. A hand-tuned heuristic would distort a value that is already a
+   softmax probability, so none is applied. ``source="raw-passthrough"``
+   makes the absence of fitted calibration explicit.
+
+When ``CALIB_ARTIFACT`` is absent locally but the deployment resolves weights
+from a Hub repo (``MODEL_ID``/``VISION_CHECKPOINT``), ``calibration.pkl`` is
+downloaded from that repo with the same best-effort semantics as the
+standalone segmentation checkpoint.
 
 Localization quality is also folded in: findings from low-confidence
 landmarks are down-weighted rather than silently trusted.
@@ -28,6 +33,7 @@ landmarks are down-weighted rather than silently trusted.
 
 from __future__ import annotations
 
+import os
 import pickle
 from pathlib import Path
 from typing import Callable, Optional
@@ -36,7 +42,7 @@ import numpy as np
 
 from config import CALIB_ARTIFACT
 
-from schemas import calibrate_ddd as _fallback_ddd
+from schemas import severity_grade as _severity_grade
 
 
 class _Calibrators:
@@ -44,8 +50,8 @@ class _Calibrators:
 
     def __init__(self):
         self.ddd: Optional[Callable] = None       # raw_conf -> probability
-        self.identity: bool = False               # keep raw probability as-is
-        self.source: str = "deterministic-fallback"
+        self.identity: bool = True                # serve the raw probability
+        self.source: str = "raw-passthrough"
 
     def fit_ddd(self, raw_conf, y):
         from sklearn.isotonic import IsotonicRegression
@@ -55,13 +61,12 @@ class _Calibrators:
 
     def apply_ddd(self, pfirrmann_grade, raw_conf) -> tuple[str, float]:
         """Return (severity label, calibrated probability)."""
-        severity, fallback_prob = _fallback_ddd(pfirrmann_grade, raw_conf)
-        if self.identity:
-            return severity, float(np.clip(raw_conf, 0.0, 1.0))
+        severity = _severity_grade(pfirrmann_grade)
         if self.ddd is not None:
-            prob = float(np.clip(self.ddd.predict([float(raw_conf)])[0], 0.0, 1.0))
+            prob = float(
+                np.clip(self.ddd.predict([float(raw_conf)])[0], 0.0, 1.0))
             return severity, prob
-        return severity, fallback_prob
+        return severity, float(np.clip(raw_conf, 0.0, 1.0))
 
 
 _calibrators: Optional[_Calibrators] = None
@@ -75,18 +80,38 @@ def get_calibrators() -> _Calibrators:
     return _calibrators
 
 
+def _hub_calibration_path() -> Optional[Path]:
+    """Download calibration.pkl from the configured Hub repo, if any."""
+    filename = os.environ.get("CALIB_FILENAME", "calibration.pkl")
+    try:
+        from weights import download_sidecar
+        return download_sidecar(filename)
+    except Exception:  # noqa: BLE001 - calibration is optional, never fatal
+        return None
+
+
 def _load_or_default() -> _Calibrators:
-    c = _Calibrators()
     path = Path(CALIB_ARTIFACT)
-    if path.exists():
-        try:
-            with open(path, "rb") as fh:
-                state = pickle.load(fh)
-            c.ddd = state.get("ddd")
-            c.identity = bool(state.get("identity", False))
-            c.source = state.get("source", "fitted")
-        except Exception:  # noqa: BLE001 - corrupt artifact -> default
-            c = _Calibrators()
+    if not path.exists():
+        hub_path = _hub_calibration_path()
+        if hub_path is not None:
+            path = Path(hub_path)
+    if not path.exists():
+        return _Calibrators()
+    try:
+        with open(path, "rb") as fh:
+            state = pickle.load(fh)
+    except Exception:  # noqa: BLE001 - corrupt artifact -> honest default
+        return _Calibrators()
+    c = _Calibrators()
+    c.ddd = state.get("ddd")
+    # An artifact produced from a passthrough decision stores ddd=None; any
+    # unreadable/old artifact also degrades to serving the raw probability.
+    c.identity = bool(state.get("identity", c.ddd is None))
+    c.source = state.get(
+        "source", "raw-passthrough" if c.ddd is None else "fitted")
+    if c.identity:
+        c.ddd = None
     return c
 
 
