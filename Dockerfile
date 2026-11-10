@@ -15,6 +15,14 @@
 
 FROM python:3.12-slim
 
+# Keep CPU inference inside small free-tier limits (512 MB / 0.1 CPU on
+# Render): one thread, glibc's arena cap, no Xet upload/download path.
+ENV OMP_NUM_THREADS=1 \
+    MKL_NUM_THREADS=1 \
+    MALLOC_ARENA_MAX=2 \
+    HF_HUB_DISABLE_XET=1 \
+    PYTHONUNBUFFERED=1
+
 WORKDIR /app
 
 # CPU-only torch (the default wheel is the ~2GB CUDA build).

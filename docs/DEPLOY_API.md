@@ -85,7 +85,13 @@ returns **503** by design — it never invents results.
 
 ---
 
-## Option A — Hugging Face Spaces (recommended)
+## Option A — Hugging Face Spaces
+
+> **Note (2026):** Hugging Face now requires a **PRO** subscription to host a
+> Docker (or Gradio) Space on `cpu-basic`; the API returns
+> `402 Payment Required` on Space creation without it. Static Spaces are still
+> free but cannot run this service. Use Option B (Render) for a free host, or
+> upgrade the account and re-run `deploy_space.py`.
 
 ### Automated: one command
 
@@ -147,14 +153,26 @@ build-log URLs. Re-run it after any code change to redeploy.
    calls. Visit `/ui` for the bundled frontend and `/docs` for a Swagger UI of
    all endpoints.
 
-## Option B — Render
+## Option B — Render (free, blueprint included)
 
-1. New **Web Service** → connect the repo → **Docker** runtime (the
-   `Dockerfile` is auto-detected).
-2. Environment variables: same set as above (`MODEL_ID`, `HF_TOKEN`, ...).
-   Render sets `PORT` itself — the Dockerfile honours it.
-3. Deploy. Render gives you `https://<service>.onrender.com` — the live link
-   for the frontend. A health-check hitting `/` keeps the free instance awake.
+`render.yaml` describes the whole service, so the deploy is point-and-click:
+
+1. Push this repo to GitHub (already: `codermisba/spinelit-ai`).
+2. Render Dashboard → **New → Blueprint** → select the repo → **Apply**.
+3. When Render asks for `HF_TOKEN`, paste the Hub token (the model repo is
+   private). `MODEL_ID` is already set to the published repo.
+4. The live URL is `https://<service>.onrender.com`; open `<url>/ui`.
+
+Constraints on the free instance (512 MB RAM, 0.1 CPU): the container sets
+`OMP_NUM_THREADS=1`/`MKL_NUM_THREADS=1`, inference takes tens of seconds, and
+the instance sleeps after ~15 min idle (first request after that is a cold
+start that also re-downloads ~107 MB of weights). Upgrade to the Starter plan
+for 512 MB→2 GB and real CPU if you want a responsive demo.
+
+Manual alternative: New **Web Service** → connect the repo → **Docker**
+runtime → add the same environment variables (`MODEL_ID`, `HF_TOKEN`, ...).
+Render sets `PORT` itself — the Dockerfile honours it. A health check on
+`/api/health` keeps the instance honest.
 
 > Tip (any host): the images used for the demo are small sagittal lumbar MRIs
 > (single JPEG/PNG per request). CPU inference of the current

@@ -264,8 +264,8 @@ inventing results.
 
 | Target | How |
 |---|---|
-| **Hugging Face Spaces** (free CPU, recommended) | Create a **Docker** Space, push this repo, set `MODEL_ID` (and `HF_TOKEN` if the model repo is private). Public URL: `https://<you>-<space>.hf.space`. |
-| **Render** | New **Web Service** → Docker runtime → same env vars. URL: `https://<service>.onrender.com`. |
+| **Render** (free tier, blueprint included) | New → **Blueprint** → pick this repo → **Apply**; paste `HF_TOKEN` when asked. `render.yaml` sets `MODEL_ID`. URL: `https://<service>.onrender.com`. |
+| **Hugging Face Spaces** (needs PRO for Docker) | `python deploy_space.py --model-repo <you>/spine-severity` — creates the Docker Space, uploads the code, sets `MODEL_ID` + `HF_TOKEN`. Public URL: `https://<you>-<space>.hf.space`. Free `cpu-basic` returns `402 Payment Required` for Docker Spaces since 2026. |
 | **Any VPS / Docker host** | `docker build -t spine-api . && docker run -p 8000:8000 -e MODEL_ID=you/spine-severity spine-api` |
 
 The model is **not baked into the image** (`checkpoints/*.pth` is ignored by

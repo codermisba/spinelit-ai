@@ -1,0 +1,31 @@
+# Render Blueprint — one-click deploy of the spine MRI API.
+#
+#   1. Push this repo to GitHub (already: codermisba/spinelit-ai).
+#   2. Render Dashboard -> New -> Blueprint -> pick the repo -> Apply.
+#   3. When prompted, paste the HF_TOKEN secret (private model repo).
+#
+# The Dockerfile is reused as-is; Render injects $PORT.  Weights are not in
+# Git: they are downloaded from MODEL_ID at container start.
+services:
+  - type: web
+    name: spine-mri-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: MODEL_ID
+        value: MisbaShaikh/spine-severity
+      - key: HF_TOKEN
+        sync: false          # paste in the Render dashboard (never in Git)
+      # Small free instances: one thread + no Xet keeps RAM and CPU predictable.
+      - key: HF_HUB_DISABLE_XET
+        value: "1"
+      - key: OMP_NUM_THREADS
+        value: "1"
+      - key: MKL_NUM_THREADS
+        value: "1"
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # Do NOT set ALLOW_MOCK_FALLBACK: without weights the API must 503, not fake.
