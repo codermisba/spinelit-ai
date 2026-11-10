@@ -71,6 +71,7 @@ from PIL import Image
 import weights
 from decision_support import run_decision_support
 from evidence_schemas import DecisionSupportResult
+from explanation import build_explanation
 import vision_engine
 
 logging.basicConfig(level=logging.INFO)
@@ -322,6 +323,8 @@ class AnalyzeResponse(DecisionSupportResult):
     annotated_image_data_url: str = ""
     gradcam_image_data_url: str = ""
     segmentation_image_data_url: str = ""
+    input_image_data_url: str = ""
+    explanation: dict = Field(default_factory=dict)
     detections: list[dict] = Field(default_factory=list)
     detection_source: str = ""
     segmentation: dict = Field(default_factory=dict)
@@ -340,7 +343,8 @@ def root():
         "docs": "/docs",
         "openapi": "/openapi.json",
         "ui": "/ui",
-        "endpoints": ["/api/health", "/api/analyze", "/ui",
+        "frontend_integration": "/integration",
+        "endpoints": ["/api/health", "/api/analyze", "/ui", "/integration",
                       "/api/segmentation/samples"],
         "vision": engine.status(),
         "registry": weights.cache_config_summary(),
@@ -355,11 +359,27 @@ UI_PATH = Path(__file__).resolve().parent / "examples" / "frontend_demo.html"
 # real overlays to show; ``outputs/segmentation`` is picked up automatically
 # after running ``evaluate_segmentation.py`` locally.
 CODE_DIR = Path(__file__).resolve().parent
+INTEGRATION_PATH = CODE_DIR / "docs" / "FRONTEND_INTEGRATION.md"
 SEG_SAMPLE_DIRS = [
     ("samples", CODE_DIR / "examples" / "segmentation_samples"),
     ("outputs", CODE_DIR / "outputs" / "segmentation"),
 ]
 _SEG_SAMPLE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.png$")
+
+
+@app.get("/integration", include_in_schema=False)
+def integration_doc():
+    """Serve the frontend-integration guide (Markdown, never cached)."""
+    if not INTEGRATION_PATH.exists():
+        return JSONResponse(
+            status_code=404,
+            content={"detail": f"Integration guide not found at {INTEGRATION_PATH}"},
+        )
+    return FileResponse(
+        INTEGRATION_PATH,
+        media_type="text/markdown; charset=utf-8",
+        headers={"Cache-Control": "no-store, max-age=0"},
+    )
 
 
 @app.get("/ui", include_in_schema=False)
@@ -546,6 +566,7 @@ async def analyze(
     payload["segmentation_image_data_url"] = (
         _png_data_url(segmentation_image) if segmentation_image is not None else ""
     )
+    payload["input_image_data_url"] = _png_data_url(image)
     payload["detections"] = detections
     payload["detection_source"] = detection_source
     payload["segmentation"] = segmentation
@@ -555,6 +576,14 @@ async def analyze(
     payload["ddd_available"] = ddd_available
     payload["model_status"] = engine.status()
     payload["mock_vision"] = mock_mode
+    payload["explanation"] = build_explanation(
+        evidence=payload["evidence"],
+        segmentation=segmentation,
+        gradcam=gradcam,
+        model_status=payload["model_status"],
+        use_llm=use_llm.strip().lower() == "true",
+        provider=(provider or None),
+    )
     return payload
 
 

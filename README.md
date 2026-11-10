@@ -243,11 +243,14 @@ frontend over HTTPS:
 
 - `GET  /` and `GET /api/health` — service metadata, model status/version
 - `POST /api/analyze` — multipart `file` upload → annotated overlay
-  (data-URL PNG), U-Net segmentation overlay, Grad-CAM overlay, per-level DDD
-  table, detections with their source, report and model version
+  (data-URL PNG), the input MRI as a data URL, U-Net segmentation overlay,
+  Grad-CAM overlay, per-level DDD table, detections with their source, a
+  grounded plain-language `explanation` (LLM when `GEMINI_API_KEY` is set,
+  otherwise deterministic), report and model version
 - `GET  /api/segmentation/samples` — real held-out segmentation overlays for
   the frontend test gallery
 - `GET  /ui` — bundled single-page frontend (`examples/frontend_demo.html`)
+- `GET  /integration` — frontend integration guide (`docs/FRONTEND_INTEGRATION.md`)
 - `GET  /docs` — interactive OpenAPI/Swagger UI
 
 ```bash

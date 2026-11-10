@@ -76,9 +76,11 @@ returns **503** by design — it never invents results.
 
 ## One-file pick
 
-- `api_server.py` — FastAPI app (`/`, `/api/health`, `/api/analyze`, `/ui`, `/docs`,
-  `/api/segmentation/samples`)
+- `api_server.py` — FastAPI app (`/`, `/api/health`, `/api/analyze`, `/ui`,
+  `/integration`, `/docs`, `/api/segmentation/samples`)
 - `examples/frontend_demo.html` — single-page frontend served at `/ui`
+- `docs/FRONTEND_INTEGRATION.md` — integration guide served at `/integration`
+- `explanation.py` — grounded LLM/deterministic explanation of the model output
 - `Dockerfile` — CPU-torch image (works on HF Spaces **and** Render)
 - `weights.py` — HF Hub model registry + auto-download
 - `publish_model.py` — upload retrained weights to the Hub
@@ -141,7 +143,7 @@ build-log URLs. Re-run it after any code change to redeploy.
    |---|---|---|
    | `MODEL_ID` | `you/spine-severity` | the model repo id (after publishing) |
    | `HF_TOKEN` | `hf_...` | secret, needed for private model repos |
-   | `GEMINI_API_KEY` | `AIza...` | optional; enables the LLM report |
+   | `GEMINI_API_KEY` | `AIza...` | optional; enables the LLM report and explanation |
    | `API_KEYS` | `key1,key2` | optional; protects the endpoint |
    | `ALLOW_MOCK_FALLBACK` | *(unset)* | demo-without-weights only |
 
@@ -227,6 +229,12 @@ or `segmentation.pth` in the Hub repo); that is reported separately under
 `vision.segmentation`, and either source makes `segmentation.available` true.
 All availability fields are derived from actually loaded weights.
 
+### `GET /integration`
+Serves `docs/FRONTEND_INTEGRATION.md` as `text/markdown; charset=utf-8` with
+`Cache-Control: no-store`. This is the guide to hand to a frontend team
+(hosted URL, CORS, fields, response shapes, error codes, JS example,
+checklist).
+
 ### `GET /ui`
 Serves the bundled frontend (`examples/frontend_demo.html`): upload, annotated
 view, Grad-CAM view, U-Net overlay, per-level table, detection table and a
@@ -261,7 +269,7 @@ Fields:
 | Field | Type | Default | Meaning |
 |---|---|---|---|
 | `file` | image | required | sagittal lumbar MRI (JPEG/PNG) |
-| `use_llm` | string | `"true"` | `"true"/"false"` — LLM report for the case |
+| `use_llm` | string | `"true"` | `"true"/"false"` — LLM report **and** explanation (falls back to deterministic text when no key/LLM) |
 | `provider` | string | `""` | e.g. `"gemini"` |
 | `case_id` | string | `""` | optional case label |
 | `clinical` | string | `"{}"` | JSON `{age, sex, pain_score, symptoms:{...}}` |
@@ -282,6 +290,8 @@ Success `200` returns the `AnalyzeResponse` JSON with:
   unchanged (no heuristic rescaling),
 - `annotated_image_data_url` (data-URL PNG overlay — render it directly in an
   `<img>`),
+- `input_image_data_url` (data-URL PNG of the uploaded MRI, so the UI can show
+  the original beside the segmentation overlay),
 - `segmentation_image_data_url` (data-URL PNG: the U-Net class mask blended
   over the uploaded scan; `""` when segmentation is unavailable or on the
   explicit demo path),
@@ -294,6 +304,11 @@ Success `200` returns the `AnalyzeResponse` JSON with:
 - `segmentation` (`{available, error, ...}`; masks are never invented),
 - `gradcam` (`{available, ...}`),
 - `ddd_available` (false whenever Pfirrmann labels were absent at training),
+- `explanation` (`{text, source, llm_used, model, error}`; `source` is
+  `"gemini"`/provider when the LLM produced the prose, otherwise
+  `"deterministic"`. Both modes use only the model evidence and never invent
+  findings; when the LLM call fails, the deterministic text is returned with
+  the error recorded),
 - `model_status` (which checkpoint/version produced this result),
 - `mock_vision: false`.
 
